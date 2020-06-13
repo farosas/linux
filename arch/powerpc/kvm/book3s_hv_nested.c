@@ -227,6 +227,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	s64 delta_purr, delta_spurr, delta_ic, delta_vtb;
 	u64 mask;
 	unsigned long lpcr;
+	unsigned long r3;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
 		return H_NOT_AVAILABLE;
@@ -290,8 +291,18 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 			r = RESUME_HOST;
 			break;
 		}
+
 		r = kvmhv_run_single_vcpu(vcpu->arch.kvm_run, vcpu, hdec_exp,
 					  lpcr);
+
+		r3 = kvmppc_get_gpr(vcpu, 3);
+		if (vcpu->arch.trap == 0xc00 && ((r3 >> 8) == 0xf1))
+			printk(KERN_DEBUG "%s r3=%#lx reason=%d",  __func__, r3, vcpu->arch.kvm_run->exit_reason);
+
+		// Do we need a new exit_reason for ucalls?
+		if (vcpu->arch.kvm_run->exit_reason == KVM_EXIT_PAPR_HCALL) {
+			r = kvmppc_pseries_do_ucall(vcpu);
+		}
 	} while (is_kvmppc_resume_guest(r));
 
 	/* save L2 state for return */

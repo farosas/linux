@@ -23,6 +23,8 @@ int kvmppc_send_page_to_uv(struct kvm *kvm, unsigned long gfn);
 unsigned long kvmppc_h_svm_init_abort(struct kvm *kvm);
 void kvmppc_uvmem_drop_pages(const struct kvm_memory_slot *free,
 			     struct kvm *kvm, bool skip_page_out);
+
+unsigned long kvmppc_h_uv_esm(struct kvm *kvm, unsigned long kbase, unsigned long fdt);
 #else
 static inline int kvmppc_uvmem_init(void)
 {
@@ -82,5 +84,11 @@ static inline int kvmppc_send_page_to_uv(struct kvm *kvm, unsigned long gfn)
 static inline void
 kvmppc_uvmem_drop_pages(const struct kvm_memory_slot *free,
 			struct kvm *kvm, bool skip_page_out) { }
+
+static inline unsigned long kvmppc_h_uv_esm(struct kvm *kvm, unsigned long kbase, unsigned long fdt)
+{
+	return U_FUNCTION;
+}
+
 #endif /* CONFIG_PPC_UV */
 #endif /* __ASM_KVM_BOOK3S_UVMEM_H__ */

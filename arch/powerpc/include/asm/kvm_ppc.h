@@ -554,6 +554,8 @@ extern bool kvm_hv_mode_active(void);
 extern void kvmppc_check_need_tlb_flush(struct kvm *kvm, int pcpu,
 					struct kvm_nested_guest *nested);
 
+/* Handling of ucalls in KVM when Ultravisor is disabled */
+extern int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu);
 #else
 static inline void __init kvm_cma_reserve(void)
 {}
@@ -584,6 +586,10 @@ static inline void kvmppc_fast_vcpu_kick(struct kvm_vcpu *vcpu)
 
 static inline bool kvm_hv_mode_active(void)		{ return false; }
 
+static inline int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
+{
+	return 0;
+}
 #endif
 
 #ifdef CONFIG_KVM_XICS

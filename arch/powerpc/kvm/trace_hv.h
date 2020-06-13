@@ -249,7 +249,7 @@ TRACE_EVENT(kvm_guest_exit,
 	TP_STRUCT__entry(
 		__field(int,		vcpu_id)
 		__field(int,		trap)
-		__field(unsigned long,	pc)
+		__field(unsigned long,	r3)
 		__field(unsigned long,	msr)
 		__field(u8,		ceded)
 	),
@@ -258,14 +258,14 @@ TRACE_EVENT(kvm_guest_exit,
 		__entry->vcpu_id = vcpu->vcpu_id;
 		__entry->trap	 = vcpu->arch.trap;
 		__entry->ceded	 = vcpu->arch.ceded;
-		__entry->pc	 = kvmppc_get_pc(vcpu);
+		__entry->r3	 = kvmppc_get_gpr(vcpu, 3);
 		__entry->msr	 = vcpu->arch.shregs.msr;
 	),
 
-	TP_printk("VCPU %d: trap=%s pc=0x%lx msr=0x%lx, ceded=%d",
+	TP_printk("VCPU %d: trap=%s r3=0x%lx msr=0x%lx, ceded=%d",
 		__entry->vcpu_id,
 		__print_symbolic(__entry->trap, kvm_trace_symbol_exit),
-		__entry->pc, __entry->msr, __entry->ceded
+		__entry->r3, __entry->msr, __entry->ceded
 	)
 );
 

@@ -831,3 +831,9 @@ void kvmppc_uvmem_free(void)
 			   resource_size(&kvmppc_uvmem_pgmap.res));
 	kfree(kvmppc_uvmem_bitmap);
 }
+
+unsigned long kvmppc_h_uv_esm(struct kvm *kvm, unsigned long kbase, unsigned long fdt)
+{
+	printk(KERN_DEBUG "%s kbase=%#lx fdt=%#lx", __func__, kbase, fdt);
+	return U_SUCCESS;
+}

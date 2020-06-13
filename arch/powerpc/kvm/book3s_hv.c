@@ -74,6 +74,7 @@
 #include <asm/hw_breakpoint.h>
 #include <asm/kvm_book3s_uvmem.h>
 #include <asm/ultravisor.h>
+#include <asm/ultravisor-api.h>
 
 #include "book3s.h"
 
@@ -1105,10 +1106,33 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
 		break;
 
 	default:
+		printk(KERN_DEBUG "unknown hcall=%#lx", req);
 		return RESUME_HOST;
 	}
 	kvmppc_set_gpr(vcpu, 3, ret);
 	vcpu->arch.hcall_needed = 0;
+	return RESUME_GUEST;
+}
+
+/* System calls that happen with LEV=2 and SMFCTRL[E]=0 come to the
+ * hypervisor. */
+int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
+{
+	unsigned long req = kvmppc_get_gpr(vcpu, 3);
+	unsigned long ret = U_FUNCTION;
+
+	switch (req) {
+	case UV_ESM:
+		printk(KERN_DEBUG "UV_ESM");
+		ret = kvmppc_h_uv_esm(vcpu->kvm,
+				      kvmppc_get_gpr(vcpu, 4),
+				      kvmppc_get_gpr(vcpu, 5));
+		break;
+	default:
+		printk(KERN_DEBUG "unknown ucall=%#lx", req);
+		return RESUME_HOST;
+	}
+	kvmppc_set_gpr(vcpu, 3, ret);
 	return RESUME_GUEST;
 }
 
@@ -1377,6 +1401,9 @@ static int kvmppc_handle_exit_hv(struct kvm_run *run, struct kvm_vcpu *vcpu,
 		run->exit_reason = KVM_EXIT_PAPR_HCALL;
 		vcpu->arch.hcall_needed = 1;
 		r = RESUME_HOST;
+		if (run->papr_hcall.nr == 0xf110) {
+			printk(KERN_DEBUG "hcall=%#llx srr1=%#llx %#lx", run->papr_hcall.nr, vcpu->arch.shregs.srr1, kvmppc_get_pc(vcpu));
+		}
 		break;
 	}
 	/*
@@ -1466,6 +1493,8 @@ static int kvmppc_handle_nested_exit(struct kvm_run *run, struct kvm_vcpu *vcpu)
 {
 	int r;
 	int srcu_idx;
+	unsigned long r3;
+
 
 	vcpu->stat.sum_exits++;
 
@@ -1551,6 +1580,16 @@ static int kvmppc_handle_nested_exit(struct kvm_run *run, struct kvm_vcpu *vcpu)
 		r = RESUME_GUEST;
 		if (!xics_on_xive())
 			kvmppc_xics_rm_complete(vcpu, 0);
+		break;
+
+	case BOOK3S_INTERRUPT_SYSCALL:
+		/* Ultracalls are handled in L0 */
+		r3 = kvmppc_get_gpr(vcpu, 3);
+		if ((r3 >> 8) == 0xf1) {
+			run->exit_reason = KVM_EXIT_PAPR_HCALL;
+			printk(KERN_DEBUG "%s hcall=%#lx reason=%d", __func__, r3, run->exit_reason);
+		}
+		r = RESUME_HOST;
 		break;
 	default:
 		r = RESUME_HOST;
