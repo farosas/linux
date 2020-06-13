@@ -474,6 +474,18 @@ config PPC_UV
 
 	  If unsure, say "N".
 
+config PPC_UV_EMULATE
+	bool "Emulate an ultravisor in the hypervisor"
+	depends on KVM_BOOK3S_HV_POSSIBLE
+	default n
+	help
+	  This option enables the hypervisor to emulate ultravisor
+	  behavior for development and testing purposes. The platform
+	  does not need to support the Protected Execution Facility
+	  (PEF) and no ultravisor firmware needs to be present.
+
+	  If unsure, say "N".
+
 config LD_HEAD_STUB_CATCH
 	bool "Reserve 256 bytes to cope with linker stubs in HEAD text" if EXPERT
 	depends on PPC64

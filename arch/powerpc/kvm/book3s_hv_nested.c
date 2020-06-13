@@ -19,6 +19,7 @@
 #include <asm/pgalloc.h>
 #include <asm/pte-walk.h>
 #include <asm/reg.h>
+#include <asm/kvm_book3s_uv.h>
 
 static struct patb_entry *pseries_partition_tb;
 
@@ -292,6 +293,9 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 			break;
 		}
 		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
+
+		r = kvmppc_uv_handle_exit(vcpu, r);
+
 	} while (is_kvmppc_resume_guest(r));
 
 	/* save L2 state for return */

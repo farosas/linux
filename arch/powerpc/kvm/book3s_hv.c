@@ -75,6 +75,8 @@
 #include <asm/kvm_book3s_uvmem.h>
 #include <asm/ultravisor.h>
 #include <asm/dtl.h>
+#include <asm/ultravisor-api.h>
+#include <asm/kvm_book3s_uv.h>
 
 #include "book3s.h"
 
@@ -904,6 +906,26 @@ static int kvmppc_get_yield_count(struct kvm_vcpu *vcpu)
 	return yield_count;
 }
 
+static int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
+{
+	unsigned long req = kvmppc_get_gpr(vcpu, 3);
+	unsigned long ret = U_SUCCESS;
+
+	switch(req) {
+	case UV_REGISTER_MEM_SLOT:
+		ret = kvmppc_uv_register_memslot();
+		break;
+	case UV_UNREGISTER_MEM_SLOT:
+		ret = kvmppc_uv_unregister_memslot();
+		break;
+	default:
+		return RESUME_HOST;
+	}
+	kvmppc_set_gpr(vcpu, 3, ret);
+	vcpu->arch.hcall_needed = 0;
+	return RESUME_GUEST;
+}
+
 int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
 {
 	unsigned long req = kvmppc_get_gpr(vcpu, 3);
@@ -1114,7 +1136,7 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
 		break;
 
 	default:
-		return RESUME_HOST;
+		return kvmppc_pseries_do_ucall(vcpu);
 	}
 	kvmppc_set_gpr(vcpu, 3, ret);
 	vcpu->arch.hcall_needed = 0;
@@ -1560,6 +1582,10 @@ static int kvmppc_handle_nested_exit(struct kvm_vcpu *vcpu)
 		r = RESUME_GUEST;
 		if (!xics_on_xive())
 			kvmppc_xics_rm_complete(vcpu, 0);
+		break;
+	case BOOK3S_INTERRUPT_SYSCALL:
+		vcpu->run->exit_reason = KVM_EXIT_PAPR_HCALL;
+		r = RESUME_HOST;
 		break;
 	default:
 		r = RESUME_HOST;
