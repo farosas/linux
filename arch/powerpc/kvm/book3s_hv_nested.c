@@ -19,6 +19,8 @@
 #include <asm/pgalloc.h>
 #include <asm/pte-walk.h>
 #include <asm/reg.h>
+#include <asm/kvm_book3s_uvmem.h>
+#include <asm/ultravisor-api.h>
 
 static struct patb_entry *pseries_partition_tb;
 
@@ -215,6 +217,23 @@ static void kvmhv_nested_mmio_needed(struct kvm_vcpu *vcpu, u64 regs_ptr)
 	}
 }
 
+/* Handles ultracalls issued by the nested guest */
+static int kvmhv_nested_do_ucall(struct kvm_vcpu *vcpu)
+{
+	unsigned long ret = U_FUNCTION;
+	unsigned long opcode = kvmppc_get_gpr(vcpu, 3);
+
+	switch (opcode) {
+	case UV_ESM:
+		ret = kvmppc_uv_esm();
+		break;
+	default:
+		return RESUME_HOST;
+	}
+	kvmppc_set_gpr(vcpu, 3, ret);
+	return RESUME_GUEST;
+}
+
 long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 {
 	long int err, r;
@@ -291,6 +310,10 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 			break;
 		}
 		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
+
+		if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL)
+			r = kvmhv_nested_do_ucall(vcpu);
+
 	} while (is_kvmppc_resume_guest(r));
 
 	/* save L2 state for return */

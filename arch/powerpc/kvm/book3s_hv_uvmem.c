@@ -845,3 +845,18 @@ void kvmppc_uvmem_free(void)
 			   resource_size(&kvmppc_uvmem_pgmap.res));
 	kfree(kvmppc_uvmem_bitmap);
 }
+
+unsigned long kvmppc_uv_esm(void)
+{
+	return U_UNSUPPORTED;
+}
+
+unsigned long kvmppc_uv_register_memslot(void)
+{
+	return U_UNSUPPORTED;
+}
+
+unsigned long kvmppc_uv_unregister_memslot(void)
+{
+	return U_UNSUPPORTED;
+}
