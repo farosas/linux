@@ -831,9 +831,72 @@ void kvmppc_uvmem_free(void)
 			   resource_size(&kvmppc_uvmem_pgmap.res));
 	kfree(kvmppc_uvmem_bitmap);
 }
-
-unsigned long kvmppc_h_uv_esm(struct kvm *kvm, unsigned long kbase, unsigned long fdt)
+/*
+static void kvmppc_dump_regs(struct kvm_vcpu *vcpu)
 {
-	printk(KERN_DEBUG "%s kbase=%#lx fdt=%#lx", __func__, kbase, fdt);
-	return U_SUCCESS;
+	int r;
+
+	pr_err("vcpu %p (%d):\n", vcpu, vcpu->vcpu_id);
+	pr_err("pc  = %.16lx  msr = %.16llx  trap = %x\n",
+	       vcpu->arch.regs.nip, vcpu->arch.shregs.msr, vcpu->arch.trap);
+	for (r = 0; r < 16; ++r)
+		pr_err("r%2d = %.16lx  r%d = %.16lx\n",
+		       r, kvmppc_get_gpr(vcpu, r),
+		       r+16, kvmppc_get_gpr(vcpu, r+16));
+	pr_err("ctr = %.16lx  lr  = %.16lx\n",
+	       vcpu->arch.regs.ctr, vcpu->arch.regs.link);
+	pr_err("srr0 = %.16llx srr1 = %.16llx\n",
+	       vcpu->arch.shregs.srr0, vcpu->arch.shregs.srr1);
+	pr_err("sprg0 = %.16llx sprg1 = %.16llx\n",
+	       vcpu->arch.shregs.sprg0, vcpu->arch.shregs.sprg1);
+	pr_err("sprg2 = %.16llx sprg3 = %.16llx\n",
+	       vcpu->arch.shregs.sprg2, vcpu->arch.shregs.sprg3);
+	pr_err("cr = %.8lx  xer = %.16lx  dsisr = %.8x\n",
+	       vcpu->arch.regs.ccr, vcpu->arch.regs.xer, vcpu->arch.shregs.dsisr);
+	pr_err("dar = %.16llx\n", vcpu->arch.shregs.dar);
+	pr_err("fault dar = %.16lx dsisr = %.8x\n",
+	       vcpu->arch.fault_dar, vcpu->arch.fault_dsisr);
+	pr_err("SLB (%d entries):\n", vcpu->arch.slb_max);
+	for (r = 0; r < vcpu->arch.slb_max; ++r)
+		pr_err("  ESID = %.16llx VSID = %.16llx\n",
+		       vcpu->arch.slb[r].orige, vcpu->arch.slb[r].origv);
+	pr_err("lpcr = %.16lx sdr1 = %.16lx last_inst = %.8x\n",
+	       vcpu->arch.vcore->lpcr, vcpu->kvm->arch.sdr1,
+	       vcpu->arch.last_inst);
+}
+*/
+
+#define setup_l1_hcall(vcpu, hcall) \
+	kvmppc_set_gpr(vcpu, 3, hcall); \
+	kvmppc_set_srr1(vcpu, kvmppc_get_srr1(vcpu) | MSR_S); \
+
+
+unsigned long kvmppc_h_uv_esm(struct kvm_vcpu *_vcpu)
+{
+	struct kvm_vcpu *vcpu = _vcpu;
+	unsigned long kbase = kvmppc_get_gpr(vcpu, 4);
+	unsigned long fdt = kvmppc_get_gpr(vcpu, 5);
+
+	if (!kbase)
+		return U_P2;
+
+	if (!fdt)
+		return U_P3;
+
+	if (kvmppc_get_srr1(vcpu) & (MSR_HV|MSR_PR)) {
+		return U_PERMISSION;
+	}
+
+	vcpu->kvm->arch.uv_esm_in_progress = true;
+
+	setup_l1_hcall(vcpu, H_SVM_INIT_START);
+	printk(KERN_DEBUG "vcpu=%px", vcpu);
+	printk(KERN_DEBUG "stack frame=%#lx", current_stack_frame());
+	uv_esm_yield(vcpu->kvm->arch.uv_esm_buf);
+	printk(KERN_DEBUG "vcpu=%px", vcpu);
+	printk(KERN_DEBUG "stack frame=%#lx", current_stack_frame());
+
+	vcpu->kvm->arch.uv_esm_in_progress = false;
+
+	return 0;
 }

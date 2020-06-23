@@ -5,6 +5,7 @@
 
 ccflags-y := -Ivirt/kvm -Iarch/powerpc/kvm
 KVM := ../../../virt/kvm
+KERNEL := ../kernel
 
 common-objs-y = $(KVM)/kvm_main.o $(KVM)/eventfd.o
 common-objs-$(CONFIG_KVM_VFIO) += $(KVM)/vfio.o
@@ -72,7 +73,7 @@ kvm-hv-y += \
 	book3s_hv_nested.o
 
 kvm-hv-$(CONFIG_PPC_UV) += \
-	book3s_hv_uvmem.o
+	book3s_hv_uvmem.o $(KERNEL)/misc.o
 
 kvm-hv-$(CONFIG_PPC_TRANSACTIONAL_MEM) += \
 	book3s_hv_tm.o

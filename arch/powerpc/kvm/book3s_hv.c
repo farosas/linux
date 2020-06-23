@@ -1104,7 +1104,12 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
 		if (kvmppc_get_srr1(vcpu) & MSR_S)
 			ret = kvmppc_h_svm_init_abort(vcpu->kvm);
 		break;
-
+	case UV_RETURN:
+		printk(KERN_DEBUG "UV_RETURN");
+		break;
+	case UV_SVM_TERMINATE:
+		printk(KERN_DEBUG "UV_SVM_TERMINATE");
+		break;
 	default:
 		printk(KERN_DEBUG "unknown hcall=%#lx", req);
 		return RESUME_HOST;
@@ -1124,10 +1129,9 @@ int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
 	switch (req) {
 	case UV_ESM:
 		printk(KERN_DEBUG "UV_ESM");
-		ret = kvmppc_h_uv_esm(vcpu->kvm,
-				      kvmppc_get_gpr(vcpu, 4),
-				      kvmppc_get_gpr(vcpu, 5));
-		break;
+		ret = kvmppc_h_uv_esm(vcpu);
+		printk(KERN_DEBUG "UV_ESM return");
+		return RESUME_HOST;
 	default:
 		printk(KERN_DEBUG "unknown ucall=%#lx", req);
 		return RESUME_HOST;
@@ -1401,7 +1405,7 @@ static int kvmppc_handle_exit_hv(struct kvm_run *run, struct kvm_vcpu *vcpu,
 		run->exit_reason = KVM_EXIT_PAPR_HCALL;
 		vcpu->arch.hcall_needed = 1;
 		r = RESUME_HOST;
-		if (run->papr_hcall.nr == 0xf110) {
+		if ((run->papr_hcall.nr >> 8) == 0xf1) {
 			printk(KERN_DEBUG "hcall=%#llx srr1=%#llx %#lx", run->papr_hcall.nr, vcpu->arch.shregs.srr1, kvmppc_get_pc(vcpu));
 		}
 		break;

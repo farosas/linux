@@ -19,6 +19,8 @@
 #include <asm/pgalloc.h>
 #include <asm/pte-walk.h>
 #include <asm/reg.h>
+#include <asm/ultravisor.h>
+
 
 static struct patb_entry *pseries_partition_tb;
 
@@ -227,7 +229,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	s64 delta_purr, delta_spurr, delta_ic, delta_vtb;
 	u64 mask;
 	unsigned long lpcr;
-	unsigned long r3;
+	int i;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
 		return H_NOT_AVAILABLE;
@@ -286,20 +288,22 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	vcpu->arch.ret = RESUME_GUEST;
 	vcpu->arch.trap = 0;
 	do {
+		if (vcpu->kvm->arch.uv_esm_in_progress) {
+			for (i=0; i< 23; i++)
+				printk(KERN_DEBUG "%lx", vcpu->kvm->arch.uv_esm_buf[i]);
+
+			uv_esm_return(vcpu->kvm->arch.uv_esm_buf);
+			/* not reached */
+		}
+
 		if (mftb() >= hdec_exp) {
 			vcpu->arch.trap = BOOK3S_INTERRUPT_HV_DECREMENTER;
 			r = RESUME_HOST;
 			break;
 		}
 
-		r = kvmhv_run_single_vcpu(vcpu->arch.kvm_run, vcpu, hdec_exp,
-					  lpcr);
+		r = kvmhv_run_single_vcpu(vcpu->arch.kvm_run, vcpu, hdec_exp, lpcr);
 
-		r3 = kvmppc_get_gpr(vcpu, 3);
-		if (vcpu->arch.trap == 0xc00 && ((r3 >> 8) == 0xf1))
-			printk(KERN_DEBUG "%s r3=%#lx reason=%d",  __func__, r3, vcpu->arch.kvm_run->exit_reason);
-
-		// Do we need a new exit_reason for ucalls?
 		if (vcpu->arch.kvm_run->exit_reason == KVM_EXIT_PAPR_HCALL) {
 			r = kvmppc_pseries_do_ucall(vcpu);
 		}

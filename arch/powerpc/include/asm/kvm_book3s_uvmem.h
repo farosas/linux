@@ -24,7 +24,7 @@ unsigned long kvmppc_h_svm_init_abort(struct kvm *kvm);
 void kvmppc_uvmem_drop_pages(const struct kvm_memory_slot *free,
 			     struct kvm *kvm, bool skip_page_out);
 
-unsigned long kvmppc_h_uv_esm(struct kvm *kvm, unsigned long kbase, unsigned long fdt);
+unsigned long kvmppc_h_uv_esm(struct kvm_vcpu *vcpu);
 #else
 static inline int kvmppc_uvmem_init(void)
 {
@@ -85,7 +85,7 @@ static inline void
 kvmppc_uvmem_drop_pages(const struct kvm_memory_slot *free,
 			struct kvm *kvm, bool skip_page_out) { }
 
-static inline unsigned long kvmppc_h_uv_esm(struct kvm *kvm, unsigned long kbase, unsigned long fdt)
+static inline unsigned long kvmppc_h_uv_esm(struct kvm_vcpu *vcpu)
 {
 	return U_FUNCTION;
 }

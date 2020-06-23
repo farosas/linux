@@ -11,6 +11,16 @@
 #include <asm/asm-prototypes.h>
 #include <asm/ultravisor-api.h>
 #include <asm/firmware.h>
+#include <asm/setjmp.h>
+
+
+#define uv_esm_return(jmp_buf) longjmp(jmp_buf, 1);
+#define uv_esm_yield(jmp_buf) \
+	wmb();		\
+	if (!setjmp(jmp_buf)) { \
+		return 0; \
+	}; \
+
 
 int early_init_dt_scan_ultravisor(unsigned long node, const char *uname,
 				  int depth, void *data);

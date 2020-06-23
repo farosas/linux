@@ -530,3 +530,8 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
 	li	r5,0
 	blr	/* image->start(physid, image->start, 0); */
 #endif /* CONFIG_KEXEC_CORE */
+
+_GLOBAL(current_stack_frame)
+	PPC_LL	r3,0(r1)
+	blr
+EXPORT_SYMBOL(current_stack_frame)

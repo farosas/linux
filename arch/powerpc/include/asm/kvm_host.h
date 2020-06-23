@@ -25,6 +25,7 @@
 #include <asm/cacheflush.h>
 #include <asm/hvcall.h>
 #include <asm/mce.h>
+#include <asm/setjmp.h>
 
 #define KVM_MAX_VCPUS		NR_CPUS
 #define KVM_MAX_VCORES		NR_CPUS
@@ -343,6 +344,8 @@ struct kvm_arch {
 	/* This array can grow quite large, keep it at the end */
 	struct kvmppc_vcore *vcores[KVM_MAX_VCORES];
 #endif
+	long uv_esm_buf[JMP_BUF_LEN];
+	bool uv_esm_in_progress;
 };
 
 #define VCORE_ENTRY_MAP(vc)	((vc)->entry_exit_map & 0xff)

@@ -113,4 +113,3 @@ _GLOBAL(longjmp)
 _GLOBAL(current_stack_frame)
 	PPC_LL	r3,0(r1)
 	blr
-EXPORT_SYMBOL(current_stack_frame)
