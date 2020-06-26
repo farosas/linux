@@ -22,6 +22,9 @@
 #define U_PERMISSION		H_PERMISSION
 #define U_SUCCESS		H_SUCCESS
 #define U_UNSUPPORTED		H_UNSUPPORTED
+#define U_NO_MEM		H_NO_MEM
+/* Internal value; not returned to guests */
+#define U_TOO_HARD		H_TOO_HARD
 
 
 /* opcodes */
