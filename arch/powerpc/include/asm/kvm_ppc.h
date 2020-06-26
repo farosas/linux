@@ -582,7 +582,6 @@ static inline void kvmppc_fast_vcpu_kick(struct kvm_vcpu *vcpu)
 }
 
 static inline bool kvm_hv_mode_active(void)		{ return false; }
-
 #endif
 
 #ifdef CONFIG_KVM_XICS

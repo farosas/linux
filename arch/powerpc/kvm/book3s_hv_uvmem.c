@@ -865,9 +865,95 @@ static void uv_gfn_set_state(unsigned long *rmap, enum uv_gpf_state state)
 	*rmap |= KVMPPC_RMAP_UV_GFN | (state & KVMPPC_RMAP_UV_GPF_STATE_MASK);
 }
 
-unsigned long kvmppc_uv_esm(void)
+static struct ucall_worker *kvmppc_ucall_worker_init(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t fn)
 {
-	return U_UNSUPPORTED;
+	struct ucall_worker *worker;
+	int r = 0;
+
+	worker = kzalloc(sizeof(struct ucall_worker), GFP_KERNEL);
+	if (!worker)
+		return NULL;
+
+	init_completion(&worker->step_done);
+	init_completion(&worker->hcall_done);
+	worker->thread_fn = fn;
+	worker->vcpu = vcpu;
+
+	r = kvm_vm_create_worker_thread(vcpu->kvm, worker->thread_fn, (uintptr_t)worker, "kvm_ucall_worker",
+					&worker->thread);
+	if (r) {
+		kfree(worker);
+		return NULL;
+	}
+
+	return worker;
+}
+
+/* the next patch will make use of this
+static void kvmppc_ucall_worker_wait(struct ucall_worker *worker)
+{
+	worker->ret = U_TOO_HARD;
+	complete(&worker->step_done);
+	wait_for_completion_killable(&worker->hcall_done);
+
+	reinit_completion(&worker->hcall_done);
+}
+*/
+
+static void __noreturn kvmppc_ucall_worker_exit(struct ucall_worker *worker, unsigned long ret)
+{
+	worker->ret = ret;
+	worker->in_progress = false;
+	complete_and_exit(&worker->step_done, 0);
+}
+
+static void __kvmppc_ucall_worker_step(struct kvm_vcpu *vcpu, struct ucall_worker *worker)
+{
+	if (!worker->in_progress) {
+		worker->in_progress = true;
+		kthread_unpark(worker->thread);
+	} else {
+		reinit_completion(&worker->step_done);
+		complete(&worker->hcall_done);
+	}
+	wait_for_completion(&worker->step_done);
+}
+
+/*
+ * This function is called to make progress with an ultracall in L0
+ * that needs assistance from the nested hypervisor. The ucall handler
+ * runs in a separate thread and does so in steps separated by
+ * hypercall requests. Returns U_TOO_HARD while there is still work to
+ * be done.
+ */
+unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, struct ucall_worker **w, kvm_vm_thread_fn_t work_fn)
+{
+	struct ucall_worker *worker = *w;
+        unsigned long ret;
+
+        if (!worker) {
+                worker = kvmppc_ucall_worker_init(vcpu, work_fn);
+                if (!worker)
+                        return U_NO_MEM;
+                *w = worker;
+        }
+
+        __kvmppc_ucall_worker_step(vcpu, worker);
+	ret = worker->ret;
+
+        if (!worker->in_progress) {
+                kfree(worker);
+                *w = NULL;
+        }
+
+        return ret;
+}
+
+int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct ucall_worker *uv_esm = (struct ucall_worker *)thread_data;
+
+	kvmppc_ucall_worker_exit(uv_esm, U_UNSUPPORTED);
 }
 
 struct kvm_nested_memslots *kvmppc_alloc_nested_slots(void)

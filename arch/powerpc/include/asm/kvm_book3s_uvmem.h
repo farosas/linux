@@ -5,7 +5,21 @@
 struct kvm_nested_memslots;
 struct kvm_nested_guest;
 
+typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 #ifdef CONFIG_PPC_UV
+
+struct ucall_worker {
+	struct task_struct *thread;
+	kvm_vm_thread_fn_t thread_fn;
+
+	struct completion step_done;
+	struct completion hcall_done;
+
+	struct kvm_vcpu *vcpu;
+	bool in_progress;
+	unsigned long ret;
+};
+
 int kvmppc_uvmem_init(void);
 void kvmppc_uvmem_free(void);
 bool kvmppc_uvmem_available(void);
@@ -42,6 +56,8 @@ unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 				      unsigned long flags, unsigned long order);
 unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid, gpa_t n_gpa,
 				   unsigned long order);
+unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, struct ucall_worker **w, kvm_vm_thread_fn_t);
+int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data);
 #else
 static inline int kvmppc_uvmem_init(void)
 {
@@ -102,7 +118,8 @@ static inline void
 kvmppc_uvmem_drop_pages(const struct kvm_memory_slot *free,
 			struct kvm *kvm, bool skip_page_out) { }
 
-static inline unsigned long kvmppc_uv_esm(void)
+static inline unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, struct ucall_worker **w,
+						 kvm_vm_thread_fn_t work_fn)
 {
 	return U_FUNCTION;
 }
@@ -142,6 +159,11 @@ static inline unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned
 						 gpa_t n_gpa, unsigned long order)
 {
 	return U_FUNCTION;
+}
+
+static inline int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	return 0;
 }
 
 #endif /* CONFIG_PPC_UV */

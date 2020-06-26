@@ -218,14 +218,19 @@ static void kvmhv_nested_mmio_needed(struct kvm_vcpu *vcpu, u64 regs_ptr)
 }
 
 /* Handles ultracalls issued by the nested guest */
-static int kvmhv_nested_do_ucall(struct kvm_vcpu *vcpu)
+static int kvmhv_nested_do_ucall(struct kvm_vcpu *vcpu, unsigned long opcode)
 {
 	unsigned long ret = U_FUNCTION;
-	unsigned long opcode = kvmppc_get_gpr(vcpu, 3);
 
 	switch (opcode) {
 	case UV_ESM:
-		ret = kvmppc_uv_esm();
+		vcpu->arch.ucall_in_progress = UV_ESM;
+
+		ret = kvmppc_ucall_do_work(vcpu, &vcpu->arch.uv_esm_worker, kvmppc_uv_esm_work_fn);
+		if (ret == U_TOO_HARD)
+			return RESUME_HOST;
+
+		vcpu->arch.ucall_in_progress = 0;
 		break;
 	default:
 		return RESUME_HOST;
@@ -246,6 +251,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	s64 delta_purr, delta_spurr, delta_ic, delta_vtb;
 	u64 mask;
 	unsigned long lpcr;
+	unsigned long opcode;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
 		return H_NOT_AVAILABLE;
@@ -309,11 +315,17 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 			r = RESUME_HOST;
 			break;
 		}
-		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
 
-		if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL)
-			r = kvmhv_nested_do_ucall(vcpu);
+		opcode = vcpu->arch.ucall_in_progress;
+		if (!opcode) {
+			r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
 
+			if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL)
+				opcode = kvmppc_get_gpr(vcpu, 3);
+		}
+
+		if (opcode)
+			r = kvmhv_nested_do_ucall(vcpu, opcode);
 	} while (is_kvmppc_resume_guest(r));
 
 	/* save L2 state for return */
