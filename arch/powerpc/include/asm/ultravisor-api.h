@@ -25,6 +25,8 @@
 #define U_STATE		H_STATE
 #define U_NO_MEM		H_NO_MEM
 #define U_RETRY		-5
+/* Internal value; not returned to guests */
+#define U_TOO_HARD		H_TOO_HARD
 
 /* opcodes */
 #define UV_WRITE_PATE			0xF104
