@@ -4899,3 +4899,4 @@ int kvm_vm_create_worker_thread(struct kvm *kvm, kvm_vm_thread_fn_t thread_fn,
 
 	return init_context.err;
 }
+EXPORT_SYMBOL_GPL(kvm_vm_create_worker_thread);

@@ -25,6 +25,7 @@ unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid, gpa_t n_gpa,
 				   unsigned long order);
 #else
+struct uv_worker;
 
 static inline long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
