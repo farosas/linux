@@ -3,6 +3,19 @@
 #define __ASM_KVM_BOOK3S_UVMEM_H__
 
 #ifdef CONFIG_PPC_UV
+
+struct ucall_worker {
+	struct task_struct *thread;
+	kvm_vm_thread_fn_t thread_fn;
+
+	struct completion step_done;
+	struct completion hcall_done;
+
+	struct kvm_vcpu *vcpu;
+	bool in_progress;
+	unsigned long ret;
+};
+
 int kvmppc_uvmem_init(void);
 void kvmppc_uvmem_free(void);
 bool kvmppc_uvmem_available(void);

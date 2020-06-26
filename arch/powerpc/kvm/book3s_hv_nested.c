@@ -286,13 +286,22 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 
 	vcpu->arch.ret = RESUME_GUEST;
 	vcpu->arch.trap = 0;
+
 	do {
 		if (mftb() >= hdec_exp) {
 			vcpu->arch.trap = BOOK3S_INTERRUPT_HV_DECREMENTER;
 			r = RESUME_HOST;
 			break;
 		}
-		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
+
+		/*
+		 * L0 issues hcalls to L1 via H_ENTER_NESTED return
+		 * path and receives the results back during
+		 * H_ENTER_NESTED entry (here), so we might need to
+		 * skip entering the guest to handle the hcall result.
+		 */
+		if (!uv_in_progress(vcpu))
+			r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
 
 		r = kvmppc_uv_handle_exit(vcpu, r);
 
