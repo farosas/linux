@@ -8,6 +8,7 @@
 
 #include <linux/kvm_host.h>
 #include <linux/bsearch.h>
+#include <linux/kthread.h>
 
 #include <asm/kvm_ppc.h>
 #include <asm/ultravisor-api.h>
@@ -18,6 +19,21 @@
  */
 #define L2_PAGE_SHIFT 16
 #define L2_PAGE_SIZE (1ULL << L2_PAGE_SHIFT)
+
+typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
+
+struct uv_worker {
+	struct task_struct *thread;
+
+	struct completion work_step_done;
+	struct completion hcall_done;
+
+	struct kvm_vcpu *vcpu;
+
+	unsigned long opcode;
+	bool in_progress;
+	unsigned long ret;
+};
 
 enum svm_state {
 	SVM_SECURE = 1,
@@ -58,6 +74,151 @@ static void uv_gfn_set_paged_in(unsigned long *rmap)
 {
 	*rmap |= KVMPPC_RMAP_UV_GFN;
 	set_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, rmap);
+}
+
+static struct uv_worker *__uv_worker_init(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t fn, unsigned long opcode)
+{
+	struct uv_worker *worker;
+	int r = 0;
+
+	worker = kzalloc(sizeof(struct uv_worker), GFP_KERNEL);
+	if (!worker)
+		return NULL;
+
+	init_completion(&worker->work_step_done);
+	init_completion(&worker->hcall_done);
+
+	/* These are for the worker function to consume. We could
+	 * convert to a single pointer to include arbitrary data in
+	 * the future */
+	worker->vcpu = vcpu;
+	worker->opcode = opcode;
+
+	r = kvm_vm_create_worker_thread(vcpu->kvm, fn, (uintptr_t)worker, "kvm_uv_worker",
+					&worker->thread);
+	if (r) {
+		kfree(worker);
+		return NULL;
+	}
+
+	return worker;
+}
+
+static void kvmppc_uv_worker_wait(struct uv_worker *worker)
+{
+	int r;
+
+	worker->ret = U_TOO_HARD;
+	complete(&worker->work_step_done);
+	r = wait_for_completion_killable(&worker->hcall_done);
+	if (r == -ERESTARTSYS) {
+		printk(KERN_DEBUG "worker killed\n");
+	}
+
+	reinit_completion(&worker->hcall_done);
+}
+
+static void __noreturn kvmppc_uv_worker_exit(struct uv_worker *worker, unsigned long ret)
+{
+	worker->ret = ret;
+	worker->in_progress = false;
+	complete_and_exit(&worker->work_step_done, 0);
+}
+
+static void __uv_worker_step(struct kvm_vcpu *vcpu, struct uv_worker *worker)
+{
+	int r;
+
+	if (!worker->in_progress) {
+		worker->in_progress = true;
+		kthread_unpark(worker->thread);
+	} else {
+		reinit_completion(&worker->work_step_done);
+		complete(&worker->hcall_done);
+	}
+
+	r = wait_for_completion_killable(&worker->work_step_done);
+	if (r == -ERESTARTSYS) {
+		printk(KERN_DEBUG "main thread killed\n");
+		worker->ret = -EINTR;
+		worker->in_progress = false;
+	}
+}
+
+bool uv_in_progress(struct kvm_vcpu *vcpu)
+{
+	return vcpu->arch.uv_worker;
+}
+
+/*
+ * This function is called to make progress with an ultracall in L0
+ * that needs assistance from the nested hypervisor. The ucall handler
+ * runs in a separate thread and does so in steps separated by
+ * hypercall requests. Returns U_TOO_HARD while there is still work to
+ * be done.
+ */
+static unsigned long kvmppc_uv_do_work(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t work_fn, unsigned long opcode)
+{
+	struct uv_worker *worker = vcpu->arch.uv_worker;
+	unsigned long ret;
+
+	if (!worker) {
+		worker = __uv_worker_init(vcpu, work_fn, opcode);
+		if (!worker)
+			return U_NO_MEM;
+		vcpu->arch.uv_worker = worker;
+	}
+
+	__kvmppc_uv_worker_step(vcpu, worker);
+	ret = worker->ret;
+
+	if (!worker->in_progress) {
+		kfree(worker);
+		vcpu->arch.uv_worker = NULL;
+	}
+
+	return ret;
+}
+
+/*
+ * Go back to L1 for a hypercall. Should be called from the worker
+ * thread.
+ */
+static int kvmppc_uv_hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs, ...)
+{
+	int i;
+	va_list args;
+	struct uv_worker *worker;
+	unsigned long ret;
+
+	worker = vcpu->arch.uv_worker;
+
+	va_start(args, nargs);
+	for (i = 0; i < nargs; ++i)
+		kvmppc_set_gpr(vcpu, 4 + i, va_arg(args, unsigned long));
+	va_end(args);
+
+	/* Set the registers as if L2 was doing the hcall. */
+	kvmppc_set_gpr(vcpu, 3, hcall);
+	kvmppc_set_srr1(vcpu, kvmppc_get_srr1(vcpu) | MSR_S);
+	vcpu->arch.trap = BOOK3S_INTERRUPT_SYSCALL;
+
+	/* wait for L1 */
+	kvmppc_uv_worker_wait(worker);
+
+	ret = kvmppc_get_gpr(vcpu, 3);
+
+	if (ret != H_SUCCESS) {
+		vcpu_debug(vcpu, "hcall %#lx failed: %#lx", hcall, ret);
+		/*
+		 * Do not pass the return value from the guest to the
+		 * upper layers because it could allow the guest to
+		 * manipulate the control flow of the host.
+		 */
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
@@ -551,9 +712,14 @@ out:
 	return ret;
 }
 
-static unsigned long kvmppc_uv_esm(void)
+int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 {
-	return U_UNSUPPORTED;
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+
+	/* temporarily to avoid unused function warnings */
+	hcall(vcpu, H_SVM_INIT_ABORT, 0);
+	kvmppc_uv_worker_exit(worker, U_UNSUPPORTED);
 }
 
 /*
@@ -567,7 +733,13 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 
 	switch (opcode) {
 	case UV_ESM:
-		ret = kvmppc_uv_esm();
+		ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_esm_work_fn, opcode);
+
+		if (ret == U_TOO_HARD)
+			return RESUME_HOST;
+
+		if (ret == U_NO_MEM)
+			ret = U_RETRY;
 		break;
 	default:
 		return RESUME_HOST;
@@ -576,6 +748,16 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 	return RESUME_GUEST;
 }
 
+/*
+ * Operations that need to call into the nested hypervisor should be
+ * dispatched from here using kvmppc_uv_do_work. After L1 handles the
+ * hypercall and calls into H_ENTER_NESTED, we detour here before
+ * going back into the L2 guest.
+ *
+ * Return values:
+ * RESUME_GUEST sends us back into L2 via kvmppc_run_single_vcpu.
+ * RESUME_HOST sends us into L1 via H_ENTER_NESTED return path.
+ */
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
 	unsigned long opcode;

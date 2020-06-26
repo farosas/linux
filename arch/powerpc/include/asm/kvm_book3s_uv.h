@@ -22,8 +22,9 @@ unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int l
 unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 				      unsigned int lpid, gpa_t gpa, gpa_t n_gpa,
 				      unsigned long flags, unsigned long order);
-
+bool uv_in_progress(struct kvm_vcpu *vcpu);
 #else
+struct uv_worker;
 
 static inline long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
@@ -61,6 +62,10 @@ static inline unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsig
 	return U_FUNCTION;
 }
 
+static inline bool uv_in_progress(struct kvm_vcpu *vcpu)
+{
+	return false;
+}
 
 #endif /* CONFIG_PPC_UV_EMULATE */
 #endif /* __ASM_KVM_BOOK3S_UV_H__ */
