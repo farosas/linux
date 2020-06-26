@@ -33,6 +33,8 @@
 #include <asm/cputhreads.h>
 
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
+#include <asm/kvm_book3s_uvmem.h>
+#include <asm/kvm_book3s_uv.h>
 #include <asm/kvm_book3s_asm.h>		/* for MAX_SMT_THREADS */
 #define KVM_MAX_VCPU_ID		(MAX_SMT_THREADS * KVM_MAX_VCORES)
 #define KVM_MAX_NESTED_GUESTS	KVMPPC_NR_LPIDS
@@ -840,6 +842,7 @@ struct kvm_vcpu_arch {
 
 	struct dentry *debugfs_dir;
 #endif /* CONFIG_KVM_BOOK3S_HV_EXIT_TIMING */
+	struct uv_worker *uv_worker;
 };
 
 #define VCPU_FPR(vcpu, i)	(vcpu)->arch.fp.fpr[i][TS_FPROFFSET]
