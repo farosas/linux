@@ -968,12 +968,119 @@ out:
 	kvmppc_ucall_worker_exit(uv_esm, ret);
 }
 
-unsigned long kvmppc_uv_register_memslot(void)
+/* called with kvm_nested_guest::slots_lock held */
+static int kvmppc_update_nested_memslots(struct list_head *memslots, struct kvm_nested_memslot *new)
 {
-	return U_UNSUPPORTED;
+	struct kvm_nested_memslot *tmp, *old, *slot;
+
+	list_for_each_entry(tmp, memslots, list) {
+		if (tmp->id == new->id) {
+			old = tmp;
+			continue;
+		}
+
+		/* check for overlaps */
+		if (!((new->base_gfn + new->npages <= tmp->base_gfn) ||
+		      (new->base_gfn >= tmp->base_gfn + tmp->npages)))
+			return -EEXIST;
+	}
+
+	slot = kzalloc(sizeof(*new), GFP_KERNEL_ACCOUNT);
+	if(!slot)
+		return -ENOMEM;
+
+	memcpy(slot, new, sizeof(*new));
+	INIT_LIST_HEAD(&slot->list);
+
+	if (old) {
+		list_replace(&old->list, &slot->list);
+		kfree(old);
+	} else {
+		list_add(&slot->list, memslots);
+	}
+
+	return 0;
 }
 
-unsigned long kvmppc_uv_unregister_memslot(void)
+/*
+ * Handle the UV_REGISTER_MEM_SLOT ucall.
+ * r4 = L1 lpid of secure guest
+ * r5 = memslot start gpa
+ * r6 = memslot size
+ * r7 = flags
+ * r8 = memslot id
+ */
+unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu, unsigned int lpid,
+					 gpa_t gpa, unsigned long nbytes, unsigned long flags, short slot_id)
 {
-	return U_UNSUPPORTED;
+	struct kvm_nested_guest *nested_guest;
+	struct kvm_nested_memslot new;
+	unsigned long ret = U_SUCCESS;
+	int r = 0;
+
+	vcpu_debug(vcpu, "%s lpid=%d gpa=%llx nbytes=%lx flags=%lx slot_id=%d", __func__,
+		   lpid, gpa, nbytes, flags, slot_id);
+
+	if (!gpa || gpa & (SVM_PAGE_SIZE - 1))
+		return U_P2;
+
+	if (!nbytes || gpa + nbytes < gpa)
+		return U_P3;
+
+	if (slot_id >= SVM_MEM_SLOTS_NUM)
+		return U_P5;
+
+	nested_guest = kvmhv_get_nested(vcpu->kvm, lpid, false);
+	if (!nested_guest)
+		return U_P4;
+
+	new.base_gfn = gpa >> SVM_PAGE_SHIFT;
+	new.npages = nbytes >> SVM_PAGE_SHIFT;
+	new.id = slot_id;
+
+	spin_lock(&nested_guest->slots_lock);
+	r = kvmppc_update_nested_memslots(&nested_guest->memslots, &new);
+	spin_unlock(&nested_guest->slots_lock);
+
+	if (r < 0)
+		ret = U_P2;
+
+	kvmhv_put_nested(nested_guest);
+	return ret;
+}
+
+/*
+ * Handle the UV_UNREGISTER_MEM_SLOT ucall.
+ * r4 = L1 lpid of secure guest
+ * r5 = memslot id
+ */
+unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id)
+{
+	struct kvm_nested_guest *nested_guest;
+	struct kvm_nested_memslot *tmp, *next;
+	unsigned long ret;
+
+	vcpu_debug(vcpu, "%s lpid=%d slot_id=%d", __func__, lpid, slot_id);
+
+	if (slot_id >= SVM_MEM_SLOTS_NUM)
+		return U_P2;
+
+	nested_guest = kvmhv_get_nested(vcpu->kvm, lpid, false);
+	if (!nested_guest)
+		return U_PARAMETER;
+
+	ret = U_P2;
+	spin_lock(&nested_guest->slots_lock);
+	list_for_each_entry_safe(tmp, next, &nested_guest->memslots, list) {
+		if (tmp->id == slot_id) {
+			list_del(&tmp->list);
+			kfree(tmp);
+			ret = U_SUCCESS;
+			break;
+		}
+	}
+	spin_unlock(&nested_guest->slots_lock);
+
+	kvmhv_put_nested(nested_guest);
+	return ret;
 }

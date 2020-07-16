@@ -45,6 +45,15 @@ struct kvm_nested_guest {
 	cpumask_t cpu_in_guest;
 	short prev_cpu[NR_CPUS];
 	u8 radix;			/* is this nested guest radix */
+	spinlock_t slots_lock;
+	struct list_head memslots;
+};
+
+struct kvm_nested_memslot {
+	struct list_head list;
+	gfn_t base_gfn;
+	unsigned long npages;
+	short id;
 };
 
 /*

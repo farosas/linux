@@ -608,6 +608,8 @@ struct kvm_nested_guest *kvmhv_alloc_nested(struct kvm *kvm, unsigned int lpid)
 	gp->l1_host = kvm;
 	gp->l1_lpid = lpid;
 	mutex_init(&gp->tlb_lock);
+	spin_lock_init(&gp->slots_lock);
+	INIT_LIST_HEAD(&gp->memslots);
 	gp->shadow_pgtable = pgd_alloc(kvm->mm);
 	if (!gp->shadow_pgtable)
 		goto out_free;

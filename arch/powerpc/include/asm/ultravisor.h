@@ -12,6 +12,10 @@
 #include <asm/ultravisor-api.h>
 #include <asm/firmware.h>
 
+#define SVM_MEM_SLOTS_NUM KVM_MEM_SLOTS_NUM
+#define SVM_PAGE_SIZE PAGE_SIZE
+#define SVM_PAGE_SHIFT PAGE_SHIFT
+
 int early_init_dt_scan_ultravisor(unsigned long node, const char *uname,
 				  int depth, void *data);
 
