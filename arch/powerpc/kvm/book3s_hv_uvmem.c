@@ -856,7 +856,6 @@ static struct ucall_worker *kvmppc_ucall_worker_init(struct kvm_vcpu *vcpu, kvm_
 	return worker;
 }
 
-/* the next patch will make use of this
 static void kvmppc_ucall_worker_wait(struct ucall_worker *worker)
 {
 	worker->ret = U_TOO_HARD;
@@ -865,7 +864,6 @@ static void kvmppc_ucall_worker_wait(struct ucall_worker *worker)
 
 	reinit_completion(&worker->hcall_done);
 }
-*/
 
 static void __noreturn kvmppc_ucall_worker_exit(struct ucall_worker *worker, unsigned long ret)
 {
@@ -883,6 +881,7 @@ static void __kvmppc_ucall_worker_step(struct kvm_vcpu *vcpu, struct ucall_worke
 		reinit_completion(&worker->step_done);
 		complete(&worker->hcall_done);
 	}
+
 	wait_for_completion(&worker->step_done);
 }
 
@@ -916,11 +915,58 @@ unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, struct ucall_worker **
         return ret;
 }
 
+static unsigned long do_l1_hcall(struct kvm_vcpu *vcpu, struct ucall_worker *worker, unsigned long hcall)
+{
+	/* set the registers as if L2 was doing the hcall */
+	kvmppc_set_gpr(vcpu, 3, hcall);
+	kvmppc_set_srr1(vcpu, kvmppc_get_srr1(vcpu) | MSR_S);
+	vcpu->arch.trap = BOOK3S_INTERRUPT_SYSCALL;
+
+	/* wait for L1 */
+	kvmppc_ucall_worker_wait(worker);
+
+	return kvmppc_get_gpr(vcpu, 3);
+}
+
+/*
+ * Handle the UV_ESM ucall.
+ * r4 = secure guest's kernel base address
+ * r5 = secure guest's firmware device tree address
+ */
 int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 {
 	struct ucall_worker *uv_esm = (struct ucall_worker *)thread_data;
+	struct kvm_vcpu *vcpu = uv_esm->vcpu;
+	unsigned long kbase = kvmppc_get_gpr(vcpu, 4);
+	unsigned long fdt = kvmppc_get_gpr(vcpu, 5);
+	unsigned long r;
+	// not documented
+	unsigned long ret = U_FUNCTION;
 
-	kvmppc_ucall_worker_exit(uv_esm, U_UNSUPPORTED);
+	if (!kbase) {
+		// not documented
+		ret = U_PARAMETER;
+		goto out;
+	}
+
+	if (!fdt) {
+		ret = U_P2;
+		goto out;
+	}
+
+	if (kvmppc_get_srr1(vcpu) & (MSR_HV|MSR_PR)) {
+		ret = U_PERMISSION;
+		goto out;
+	}
+
+	r = do_l1_hcall(vcpu, uv_esm, H_SVM_INIT_START);
+	if (r != U_SUCCESS)
+		goto out;
+
+	r = do_l1_hcall(vcpu, uv_esm, H_SVM_INIT_DONE);
+
+out:
+	kvmppc_ucall_worker_exit(uv_esm, ret);
 }
 
 unsigned long kvmppc_uv_register_memslot(void)
