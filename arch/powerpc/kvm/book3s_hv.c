@@ -913,10 +913,17 @@ static int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
 
 	switch(req) {
 	case UV_REGISTER_MEM_SLOT:
-		ret = kvmppc_uv_register_memslot();
+		ret = kvmppc_uv_register_memslot(vcpu,
+						 (unsigned int)kvmppc_get_gpr(vcpu, 4),
+						 (gpa_t)kvmppc_get_gpr(vcpu, 5),
+						 kvmppc_get_gpr(vcpu, 6),
+						 kvmppc_get_gpr(vcpu, 7),
+						 (short)kvmppc_get_gpr(vcpu, 8));
 		break;
 	case UV_UNREGISTER_MEM_SLOT:
-		ret = kvmppc_uv_unregister_memslot();
+		ret = kvmppc_uv_unregister_memslot(vcpu,
+						   (unsigned int)kvmppc_get_gpr(vcpu, 4),
+						   (short)kvmppc_get_gpr(vcpu, 5));
 		break;
 	default:
 		return RESUME_HOST;
