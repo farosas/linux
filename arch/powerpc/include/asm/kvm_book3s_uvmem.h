@@ -2,6 +2,9 @@
 #ifndef __ASM_KVM_BOOK3S_UVMEM_H__
 #define __ASM_KVM_BOOK3S_UVMEM_H__
 
+struct kvm_nested_memslots;
+struct kvm_nested_guest;
+
 #ifdef CONFIG_PPC_UV
 int kvmppc_uvmem_init(void);
 void kvmppc_uvmem_free(void);
@@ -24,9 +27,16 @@ unsigned long kvmppc_h_svm_init_abort(struct kvm *kvm);
 void kvmppc_uvmem_drop_pages(const struct kvm_memory_slot *free,
 			     struct kvm *kvm, bool skip_page_out);
 
+struct kvm_nested_memslots *kvmppc_alloc_nested_slots(void);
+void kvmppc_free_nested_slots(struct kvm_nested_guest *nested_guest);
 unsigned long kvmppc_uv_esm(void);
-unsigned long kvmppc_uv_register_memslot(void);
-unsigned long kvmppc_uv_unregister_memslot(void);
+unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu,
+					 unsigned int lpid,
+					 gpa_t gpa,
+					 unsigned long nbytes,
+					 unsigned long flags,
+					 short slot_id);
+unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id);
 #else
 static inline int kvmppc_uvmem_init(void)
 {
@@ -92,12 +102,26 @@ static inline unsigned long kvmppc_uv_esm(void)
 	return U_FUNCTION;
 }
 
-static inline unsigned long kvmppc_uv_register_memslot(void)
+struct inline kvm_nested_memslots *kvmppc_alloc_nested_slots(void)
+{
+	return NULL;
+}
+
+static inline void kvmppc_free_nested_slots(struct kvm_nested_guest *nested_guest)
+{
+}
+
+static inline unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu,
+						       unsigned int lpid,
+						       gpa_t gpa,
+						       unsigned long nbytes,
+						       unsigned long flags,
+						       short slot_id)
 {
 	return U_FUNCTION;
 }
 
-static inline unsigned long kvmppc_uv_unregister_memslot(void)
+static unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id)
 {
 	return U_FUNCTION;
 }
