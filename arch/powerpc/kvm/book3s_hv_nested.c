@@ -230,6 +230,9 @@ static int kvmhv_nested_do_ucall(struct kvm_vcpu *vcpu, unsigned long opcode)
 		if (ret == U_TOO_HARD)
 			return RESUME_HOST;
 
+		if (ret == U_NO_MEM)
+			return U_RETRY;
+
 		vcpu->arch.ucall_in_progress = 0;
 		break;
 	default:

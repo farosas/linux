@@ -889,7 +889,6 @@ static struct ucall_worker *kvmppc_ucall_worker_init(struct kvm_vcpu *vcpu, kvm_
 	return worker;
 }
 
-/* the next patch will make use of this
 static void kvmppc_ucall_worker_wait(struct ucall_worker *worker)
 {
 	worker->ret = U_TOO_HARD;
@@ -898,7 +897,6 @@ static void kvmppc_ucall_worker_wait(struct ucall_worker *worker)
 
 	reinit_completion(&worker->hcall_done);
 }
-*/
 
 static void __noreturn kvmppc_ucall_worker_exit(struct ucall_worker *worker, unsigned long ret)
 {
@@ -916,6 +914,7 @@ static void __kvmppc_ucall_worker_step(struct kvm_vcpu *vcpu, struct ucall_worke
 		reinit_completion(&worker->step_done);
 		complete(&worker->hcall_done);
 	}
+
 	wait_for_completion(&worker->step_done);
 }
 
@@ -949,11 +948,151 @@ unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, struct ucall_worker **
         return ret;
 }
 
+static unsigned long do_l1_hcall(struct kvm_vcpu *vcpu, struct ucall_worker *worker,
+				 unsigned long hcall, int nargs, ...)
+{
+	int i;
+	va_list args;
+
+	va_start(args, nargs);
+	for (i = 0; i < nargs; ++i)
+		kvmppc_set_gpr(vcpu, 4 + i, va_arg(args, unsigned long));
+	va_end(args);
+
+	/* Set the registers as if L2 was doing the hcall. */
+	kvmppc_set_gpr(vcpu, 3, hcall);
+	kvmppc_set_srr1(vcpu, kvmppc_get_srr1(vcpu) | MSR_S);
+	vcpu->arch.trap = BOOK3S_INTERRUPT_SYSCALL;
+
+	/* wait for L1 */
+	kvmppc_ucall_worker_wait(worker);
+
+	return kvmppc_get_gpr(vcpu, 3);
+}
+
+static bool uv_gfn_paged_in(unsigned long *rmap)
+{
+	return (uv_gfn_rmap_valid(*rmap) && test_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, rmap));
+}
+
+static void uv_gfn_set_paged_in(unsigned long *rmap)
+{
+	if (uv_gfn_rmap_valid(*rmap))
+		set_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, rmap);
+}
+
+unsigned long kvmppc_page_in_hcall(struct kvm_vcpu *vcpu, gpa_t gpa, int type)
+{
+	return do_l1_hcall(vcpu, vcpu->arch.uv_esm_worker,
+			   H_SVM_PAGE_IN, 3, gpa, type, PAGE_SHIFT);
+}
+
+static int kvmppc_page_in_from_hv(struct kvm_vcpu *vcpu, unsigned long *rmap, gfn_t start_gfn, unsigned long npages)
+{
+	unsigned long ret;
+	gfn_t gfn;
+	int r = 0;
+
+	if (!npages)
+		return -EINVAL;
+
+	for (gfn = start_gfn; gfn < start_gfn + npages; gfn++) {
+
+		if (uv_gfn_paged_in(&rmap[gfn]) ||
+		    uv_gfn_state(rmap[gfn]) != GPF_SECURE)
+			continue;
+		ret = kvmppc_page_in_hcall(vcpu, gfn_to_gpa(gfn), H_PAGE_IN_NONSHARED);
+		if (ret != H_SUCCESS) {
+			r = -1;
+			break;
+		}
+
+		uv_gfn_set_paged_in(&rmap[gfn]);
+	}
+
+	return r;
+}
+
+static int kvmppc_page_in_from_hv_all(struct kvm_vcpu *vcpu, struct kvm_nested_guest *nested_guest)
+{
+	struct kvm_memory_slot *memslot;
+	int r;
+
+	if (!nested_guest)
+		return -EINVAL;
+
+	if (nested_guest->svm_state == SVM_SECURE)
+		return -EPERM;
+
+	mutex_lock(&nested_guest->slots_lock);
+	kvm_for_each_memslot(memslot, nested_guest->memslots) {
+		r = kvmppc_page_in_from_hv(vcpu,
+					   memslot->arch.rmap,
+					   memslot->base_gfn,
+					   memslot->npages);
+		if (r)
+			goto out;
+	}
+out:
+	mutex_unlock(&nested_guest->slots_lock);
+	return r;
+}
+
+/*
+ * Handle the UV_ESM ucall.
+ * r4 = secure guest's kernel base address
+ * r5 = secure guest's firmware device tree address
+ */
 int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 {
 	struct ucall_worker *uv_esm = (struct ucall_worker *)thread_data;
+	struct kvm_vcpu *vcpu = uv_esm->vcpu;
+	unsigned long kbase = kvmppc_get_gpr(vcpu, 4);
+	unsigned long fdt = kvmppc_get_gpr(vcpu, 5);
+	int r;
+	// not documented
+	unsigned long ret = U_FUNCTION;
 
-	kvmppc_ucall_worker_exit(uv_esm, U_UNSUPPORTED);
+	if (!kbase) {
+		// not documented
+		ret = U_PARAMETER;
+		goto out;
+	}
+
+	if (!fdt) {
+		ret = U_P2;
+		goto out;
+	}
+
+	if (kvmppc_get_srr1(vcpu) & (MSR_HV|MSR_PR)) {
+		ret = U_PERMISSION;
+		goto out;
+	}
+
+	ret = do_l1_hcall(vcpu, uv_esm, H_SVM_INIT_START, 0);
+	if (ret != H_SUCCESS)
+		goto abort;
+
+	r = kvmppc_page_in_from_hv_all(vcpu, vcpu->arch.nested);
+	if (r)
+		goto abort;
+
+	ret = do_l1_hcall(vcpu, uv_esm, H_SVM_INIT_DONE, 0);
+	if (ret != H_SUCCESS)
+		goto abort;
+
+	vcpu->arch.nested->svm_state = SVM_SECURE;
+	ret = U_SUCCESS;
+out:
+	kvmppc_ucall_worker_exit(uv_esm, ret);
+abort:
+	vcpu->arch.nested->svm_state = SVM_ABORT;
+
+	/* H_SVM_INIT_ABORT returns H_PARAMETER on completion. */
+	ret = do_l1_hcall(vcpu, uv_esm, H_SVM_INIT_ABORT, 0);
+	if (ret != H_PARAMETER)
+		pr_err_ratelimited("KVM-UV: vm abortion did not complete\n");
+	kvmppc_ucall_worker_exit(uv_esm, H_PARAMETER);
 }
 
 struct kvm_nested_memslots *kvmppc_alloc_nested_slots(void)

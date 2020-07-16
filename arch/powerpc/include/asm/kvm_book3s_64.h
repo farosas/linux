@@ -34,6 +34,11 @@ struct kvm_nested_memslots {
 	struct kvm_memory_slot memslots[KVM_MEM_SLOTS_NUM];
 };
 
+enum svm_state {
+	SVM_SECURE = 1,
+	SVM_ABORT,
+};
+
 /*
  * Structure for a nested guest, that is, for a guest that is managed by
  * one of our guests.
@@ -52,6 +57,7 @@ struct kvm_nested_guest {
 	cpumask_t cpu_in_guest;
 	short prev_cpu[NR_CPUS];
 	u8 radix;			/* is this nested guest radix */
+	enum svm_state svm_state;
 	struct mutex slots_lock;
 	struct kvm_nested_memslots *memslots; /* for L0's tracking of memslots */
 };
