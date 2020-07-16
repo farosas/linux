@@ -40,8 +40,15 @@ void kvmppc_uvmem_drop_pages(const struct kvm_memory_slot *free,
 
 unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, struct ucall_worker **w, kvm_vm_thread_fn_t);
 int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data);
-unsigned long kvmppc_uv_register_memslot(void);
-unsigned long kvmppc_uv_unregister_memslot(void);
+struct kvm_nested_memslots *kvmppc_alloc_nested_slots(size_t size);
+void kvmppc_free_nested_slots(struct kvm_nested_memslots *slots);
+unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu,
+					 unsigned int lpid,
+					 gpa_t gpa,
+					 unsigned long nbytes,
+					 unsigned long flags,
+					 short slot_id);
+unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id);
 #else
 static inline int kvmppc_uvmem_init(void)
 {
@@ -113,12 +120,26 @@ static inline int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	return 0;
 }
 
-static inline unsigned long kvmppc_uv_register_memslot(void)
+struct kvm_nested_memslots *kvmppc_alloc_nested_slots(size_t size)
+{
+	return NULL;
+}
+
+void kvmppc_free_nested_slots(struct kvm_nested_memslots *slots)
+{
+}
+
+static unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu,
+					 unsigned int lpid,
+					 gpa_t gpa,
+					 unsigned long nbytes,
+					 unsigned long flags,
+					 short slot_id)
 {
 	return U_FUNCTION;
 }
 
-static inline unsigned long kvmppc_uv_unregister_memslot(void)
+static unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id)
 {
 	return U_FUNCTION;
 }

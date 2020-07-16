@@ -611,12 +611,16 @@ struct kvm_nested_guest *kvmhv_alloc_nested(struct kvm *kvm, unsigned int lpid)
 	gp->l1_host = kvm;
 	gp->l1_lpid = lpid;
 	mutex_init(&gp->tlb_lock);
+	spin_lock_init(&gp->slots_lock);
 	gp->shadow_pgtable = pgd_alloc(kvm->mm);
 	if (!gp->shadow_pgtable)
 		goto out_free;
 	shadow_lpid = kvmppc_alloc_lpid();
 	if (shadow_lpid < 0)
 		goto out_free2;
+	gp->memslots = kvmppc_alloc_nested_slots(sizeof(struct kvm_nested_memslots));
+	if (!gp->memslots)
+		goto out_free3;
 	gp->shadow_lpid = shadow_lpid;
 	gp->radix = 1;
 
@@ -624,6 +628,8 @@ struct kvm_nested_guest *kvmhv_alloc_nested(struct kvm *kvm, unsigned int lpid)
 
 	return gp;
 
+ out_free3:
+	kvmppc_free_lpid(gp->shadow_lpid);
  out_free2:
 	pgd_free(kvm->mm, gp->shadow_pgtable);
  out_free:
@@ -650,6 +656,7 @@ static void kvmhv_release_nested(struct kvm_nested_guest *gp)
 	}
 	kvmhv_set_ptbl_entry(gp->shadow_lpid, 0, 0);
 	kvmppc_free_lpid(gp->shadow_lpid);
+	kvmppc_free_nested_slots(gp->memslots);
 	kfree(gp);
 }
 

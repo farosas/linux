@@ -27,6 +27,12 @@ static inline bool kvmhv_on_pseries(void)
 }
 #endif
 
+struct kvm_nested_memslots {
+	int used_slots;
+	short id_to_index[KVM_MEM_SLOTS_NUM];
+	struct kvm_memory_slot memslots[];
+};
+
 /*
  * Structure for a nested guest, that is, for a guest that is managed by
  * one of our guests.
@@ -45,6 +51,8 @@ struct kvm_nested_guest {
 	cpumask_t cpu_in_guest;
 	short prev_cpu[NR_CPUS];
 	u8 radix;			/* is this nested guest radix */
+	spinlock_t slots_lock;
+	struct kvm_nested_memslots *memslots; /* for L0's tracking of memslots */
 };
 
 /*

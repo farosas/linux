@@ -969,12 +969,285 @@ out:
 	kvmppc_ucall_worker_exit(uv_esm, ret);
 }
 
-unsigned long kvmppc_uv_register_memslot(void)
+struct kvm_nested_memslots *kvmppc_alloc_nested_slots(size_t size)
 {
-	return U_UNSUPPORTED;
+	struct kvm_nested_memslots *slots;
+	int i;
+
+	slots = kvzalloc(size, GFP_KERNEL_ACCOUNT);
+	if (!slots)
+		return NULL;
+
+	for (i = 0; i < KVM_MEM_SLOTS_NUM; i++)
+		slots->id_to_index[i] = -1;
+
+	return slots;
 }
 
-unsigned long kvmppc_uv_unregister_memslot(void)
+void kvmppc_free_nested_slots(struct kvm_nested_memslots *slots)
 {
-	return U_UNSUPPORTED;
+	if (!slots)
+		return;
+	kvfree(slots);
+}
+
+static struct kvm_nested_memslots *realloc_nested_slots(struct kvm_nested_memslots *old_slots, int nslots)
+{
+	struct kvm_nested_memslots *slots;
+	size_t size;
+
+	if (!old_slots)
+		return NULL;
+
+	size = sizeof(struct kvm_nested_memslots) +
+		(sizeof(struct kvm_memory_slot) * nslots);
+
+	slots = kvmppc_alloc_nested_slots(size);
+	if (!slots)
+		return NULL;
+
+	memcpy(slots, old_slots, size);
+	kvmppc_free_nested_slots(old_slots);
+
+	return slots;
+}
+
+static const struct kvm_memory_slot *get_memslot(struct kvm_nested_memslots *slots, short slot_id)
+{
+	short i;
+
+	if (!slots || slot_id >= KVM_MEM_SLOTS_NUM || slot_id < 0)
+		return NULL;
+
+	i = slots->id_to_index[slot_id];
+	if (i < 0)
+		return NULL;
+
+	return &slots->memslots[i];
+}
+/*
+static bool kvmppc_gfn_range_valid(struct kvm_nested_memslots *slots, gfn_t base_gfn, unsigned long npages)
+{
+	struct kvm_memory_slot *tmp;
+	gfn_t end_gfn;
+
+	if (npages <= 0)
+		return false;
+
+	end_gfn = base_gfn + npages;
+
+	kvm_for_each_memslot(tmp, slots) {
+		if (end_gfn > tmp->base_gfn + tmp->npages)
+			return false;
+
+		if (base_gfn >= tmp->base_gfn)
+			return true;
+
+		if (end_gfn >= tmp->base_gfn)
+			end_gfn = tmp->base_gfn - 1;
+	}
+
+	return false;
+}
+*/
+/* Move this memslot to the end of the list and erase it. The caller
+ * might use the extra space to hold another memslot. */
+static void delete_memslot(struct kvm_nested_memslots *slots, const struct kvm_memory_slot *memslot)
+{
+	short id = memslot->id;
+	int i;
+
+	for (i = slots->id_to_index[id]; i < slots->used_slots - 1; i++) {
+		slots->memslots[i] = slots->memslots[i + 1];
+		slots->id_to_index[slots->memslots[i].id] = i;
+	}
+
+	slots->memslots[i] = *memslot;
+	memset(&slots->memslots[i], 0, sizeof(*memslot));
+	slots->id_to_index[id] = -1;
+	slots->used_slots--;
+}
+
+/* Move all memslots after 'pos' one position forward and insert the
+ * memslot. */
+static void insert_memslot(struct kvm_nested_memslots *slots, struct kvm_memory_slot *memslot, int pos)
+{
+	int i;
+
+	for (i = slots->used_slots; i > pos; i--) {
+		slots->memslots[i] = slots->memslots[i - 1];
+		slots->id_to_index[slots->memslots[i].id] = i;
+	}
+
+	slots->memslots[pos] = *memslot;
+	slots->id_to_index[memslot->id] = pos;
+	slots->used_slots++;
+}
+
+static struct kvm_nested_memslots *update_memslots(struct kvm_nested_memslots *old_slots,
+						   const struct kvm_memory_slot *old,
+						   struct kvm_memory_slot *new, int pos)
+{
+	struct kvm_nested_memslots *new_slots;
+	int nslots;
+
+	if (!old_slots || (!old && !new))
+		return NULL;
+
+	if (old)
+		delete_memslot(old_slots, old);
+
+	nslots = old_slots->used_slots;
+	if (new)
+		nslots += 1;
+
+	new_slots = realloc_nested_slots(old_slots, nslots);
+	if (new_slots && new)
+		insert_memslot(new_slots, new, pos);
+
+	return new_slots;
+}
+
+static int kvmppc_insert_nested_memslot(struct kvm_nested_guest *nested_guest, struct kvm_memory_slot *new)
+{
+	struct kvm_nested_memslots *new_slots, *slots = nested_guest->memslots;
+	struct kvm_memory_slot *tmp;
+	const struct kvm_memory_slot *old;
+	int i, pos;
+
+	if (!new)
+		return -EINVAL;
+
+	old = get_memslot(slots, new->id);
+
+	if (slots->used_slots >= KVM_MEM_SLOTS_NUM && !old)
+		/* can't fit anymore slots */
+		return -EINVAL;
+
+	for (i = 0, pos = 0; i < slots->used_slots; i++, pos++) {
+		tmp = &slots->memslots[i];
+
+		/* new goes before tmp */
+		if (new->base_gfn >= tmp->base_gfn + tmp->npages) {
+			break;
+		}
+
+		/* new goes after tmp */
+		if (new->base_gfn + new->npages <= tmp->base_gfn) {
+			/* walked past the slot we're trying to move */
+			if (old && new->id == tmp->id)
+				pos--;
+			continue;
+		}
+
+		/* overlap */
+		return -EEXIST;
+	}
+
+	new_slots = update_memslots(slots, old, new, pos);
+	if (!new_slots)
+		return -ENOMEM;
+	nested_guest->memslots = new_slots;
+	return 0;
+}
+
+static int kvmppc_remove_nested_memslot(struct kvm_nested_guest *nested_guest, const struct kvm_memory_slot *old)
+{
+	struct kvm_nested_memslots *new_slots, *slots = nested_guest->memslots;
+
+	if (!old)
+		return -EINVAL;
+
+	new_slots = update_memslots(slots, old, NULL, 0);
+	if (!new_slots)
+		return -ENOMEM;
+	nested_guest->memslots = new_slots;
+
+	return 0;
+}
+
+/*
+ * Handle the UV_REGISTER_MEM_SLOT ucall.
+ * r4 = L1 lpid of secure guest
+ * r5 = memslot start gpa
+ * r6 = memslot size
+ * r7 = flags
+ * r8 = memslot id
+ */
+unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu, unsigned int lpid,
+					 gpa_t gpa, unsigned long nbytes, unsigned long flags, short slot_id)
+{
+	struct kvm_nested_guest *nested_guest;
+	struct kvm_memory_slot new;
+	unsigned long ret = U_SUCCESS;
+	int r = 0;
+
+	vcpu_debug(vcpu, "%s lpid=%d gpa=%llx nbytes=%lx flags=%lx slot_id=%d", __func__,
+		   lpid, gpa, nbytes, flags, slot_id);
+
+	if (gpa & (PAGE_SIZE - 1))
+		return U_P2;
+
+	if (!nbytes || gpa + nbytes < gpa)
+		return U_P3;
+
+	if (slot_id >= KVM_MEM_SLOTS_NUM)
+		return U_P5;
+
+	nested_guest = kvmhv_get_nested(vcpu->kvm, lpid, false);
+	if (!nested_guest)
+		return U_P4;
+
+	new.base_gfn = gpa >> PAGE_SHIFT;
+	new.npages = nbytes >> PAGE_SHIFT;
+	new.id = slot_id;
+
+	spin_lock(&nested_guest->slots_lock);
+	r = kvmppc_insert_nested_memslot(nested_guest, &new);
+	spin_unlock(&nested_guest->slots_lock);
+
+	if (r < 0)
+		ret = U_P2;
+
+	kvmhv_put_nested(nested_guest);
+	return ret;
+}
+
+/*
+ * Handle the UV_UNREGISTER_MEM_SLOT ucall.
+ * r4 = L1 lpid of secure guest
+ * r5 = memslot id
+ */
+unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id)
+{
+	struct kvm_nested_guest *nested_guest;
+	const struct kvm_memory_slot *old;
+	unsigned long ret = U_SUCCESS;
+	int r;
+
+	vcpu_debug(vcpu, "%s lpid=%d slot_id=%d", __func__, lpid, slot_id);
+
+	if (slot_id >= KVM_MEM_SLOTS_NUM)
+		return U_P2;
+
+	nested_guest = kvmhv_get_nested(vcpu->kvm, lpid, false);
+	if (!nested_guest)
+		return U_PARAMETER;
+
+	old = get_memslot(nested_guest->memslots, slot_id);
+	if (!old) {
+		ret = U_P2;
+		goto out;
+	}
+
+	spin_lock(&nested_guest->slots_lock);
+	r = kvmppc_remove_nested_memslot(nested_guest, old);
+	spin_unlock(&nested_guest->slots_lock);
+
+	if (r < 0)
+		ret = U_P2;
+
+out:
+	kvmhv_put_nested(nested_guest);
+	return ret;
 }
