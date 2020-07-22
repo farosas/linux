@@ -969,23 +969,153 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 
 out:
 	kvmppc_ucall_worker_exit(uv_esm, ret);
+
+}
+
+int kvmppc_page_in_from_hv_all(struct kvm_vcpu, struct kvm_nested_guest *nested_guest)
+{
+	struct kvm_nested_memslot *slot;
+	gpa_t gpa;
+	unsigned long nbytes;
+	int r = 0;
+	pte_t *pte;
+
+	if (!nested_guest)
+		return -1;
+
+	spin_lock(&nested_guest->slots_lock);
+	list_for_each_entry(slot, &nested_guest->memslots, list) {
+		gpa = gfn_to_gpa(slot->base_gfn);
+		nbytes = slot->npages << PAGE_SHIFT;
+
+		r = kvmppc_page_in_from_hv(nested_guest, gpa, nbytes);
+		if (r < 0) {
+			break;
+		}
+	}
+	spin_unlock(&nested_guest->slots_lock);
+
+	return r;
+}
+
+int kvmppc_page_in_from_hv(struct kvm_vcpu *vcpu, gpa_t gpa, unsigned long len)
+{
+	gfn_t start_gfn = gpa_to_gfn(gpa);
+	gfn_t end_gfn = gpa_to_gfn((gpa + len - 1));
+	int r = 0;
+
+	if (!len)
+		return -1;
+
+	if(vcpu->kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
+		return -1;
+/*
+	if (!valid_gfn_range(svm, start_gfn, len)) {
+		return -1;
+	}
+*/
+	for (gfn = start_gfn; gfn <= end_gfn; gfn++) {
+		if(is_page_paged_in(svm, gfn))
+			continue;
+
+		svm_gfn_lock(svm, (gfn));
+		state = svm_get_gfn_state(svm, gfn);
+		svm_gfn_unlock(svm, (gfn));
+
+		if (state != GPF_SECURE)
+			continue;
+
+		r = do_l1_hcall(H_SVM_PAGE_IN, 3, NULL, 0, gfn_to_gpa(gfn),
+				 H_PAGE_IN_NONSHARED, PAGE_SHIFT);
+		if (r)
+			return -1;
+
+		set_page_paged_in(svm, gfn);
+	}
+
+	return 0;
+}
+
+struct nested_kvm_memslot *get_memslot(struct list_head *memslots, short id)
+{
+	struct kvm_nested_memslot *tmp;
+
+	list_for_each_entry(tmp, memslots, list) {
+		if (tmp->id == id) {
+			return tmp;
+		}
+	}
+
+	return NULL;
+}
+
+bool gfn_range_valid(struct list_head *memslots, gfn_t base_gfn, unsigned long npages)
+{
+	struct kvm_nested_memslot *tmp;
+	gfn_t end_gfn;
+
+	if (npages <= 0)
+		return false;
+
+	end_gfn = base_gfn + npages;
+
+	list_for_each_entry(tmp, memslots, list) {
+		if (end_gfn > tmp->base_gfn + tmp->npages)
+			return false;
+
+		if (base_gfn >= tmp->base_gfn)
+			return true;
+
+		if (end_gfn >= tmp->base_gfn)
+			end_gfn = tmp->base_gfn - 1;
+	}
+
+	return false;
 }
 
 /* called with kvm_nested_guest::slots_lock held */
-static int kvmppc_update_nested_memslots(struct list_head *memslots, struct kvm_nested_memslot *new)
+static int kvmppc_insert_nested_memslots(struct list_head *memslots, struct kvm_nested_memslot *new)
 {
-	struct kvm_nested_memslot *tmp, *old, *slot;
+	struct kvm_nested_memslot *tmp, *pos, *slot;
+	struct kvm_nested_memslot *old;
+	struct list_head *pos;
+
+	printk(KERN_DEBUG "%s", __func__);
+	list_for_each_entry(tmp, memslots, list) {
+		printk(KERN_CONT " -> %d", tmp->id);
+	}
+	printk(KERN_DEBUG "#\n");
+
+	/* in case the slot is being moved */
+	old = get_memslot(new->id);
+
+	pos = memslots;
 
 	list_for_each_entry(tmp, memslots, list) {
-		if (tmp->id == new->id) {
-			old = tmp;
+		if (old && tmp->id == old->id) {
 			continue;
 		}
 
-		/* check for overlaps */
-		if (!((new->base_gfn + new->npages <= tmp->base_gfn) ||
-		      (new->base_gfn >= tmp->base_gfn + tmp->npages)))
-			return -EEXIST;
+		/* new goes before tmp */
+		if (new->base_gfn >= tmp->base_gfn + tmp->npages) {
+			pos = tmp->list->prev;
+			break;
+		}
+
+		/* new goes after tmp */
+		if (new->base_gfn + new->npages <= cur->base_gfn) {
+			pos = tmp->list;
+			continue;
+		}
+
+		return -EEXIST;
+	}
+
+	if (old) {
+		if (pos == old->list)
+			pos = old->list->prev;
+		list_del(&old->list);
+		kfree(old);
 	}
 
 	slot = kzalloc(sizeof(*new), GFP_KERNEL_ACCOUNT);
@@ -995,6 +1125,9 @@ static int kvmppc_update_nested_memslots(struct list_head *memslots, struct kvm_
 	memcpy(slot, new, sizeof(*new));
 	INIT_LIST_HEAD(&slot->list);
 
+	list_add(&slot->list, pos->list);
+	return 0;
+}
 	if (old) {
 		list_replace(&old->list, &slot->list);
 		kfree(old);
@@ -1017,32 +1150,32 @@ unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu, unsigned int lpi
 					 gpa_t gpa, unsigned long nbytes, unsigned long flags, short slot_id)
 {
 	struct kvm_nested_guest *nested_guest;
-	struct kvm_nested_memslot new;
+	struct kvm_memory_slot new;
 	unsigned long ret = U_SUCCESS;
 	int r = 0;
 
 	vcpu_debug(vcpu, "%s lpid=%d gpa=%llx nbytes=%lx flags=%lx slot_id=%d", __func__,
 		   lpid, gpa, nbytes, flags, slot_id);
 
-	if (!gpa || gpa & (SVM_PAGE_SIZE - 1))
+	if (gpa & (PAGE_SIZE - 1))
 		return U_P2;
 
 	if (!nbytes || gpa + nbytes < gpa)
 		return U_P3;
 
-	if (slot_id >= SVM_MEM_SLOTS_NUM)
+	if (slot_id >= KVM_MEM_SLOTS_NUM)
 		return U_P5;
 
 	nested_guest = kvmhv_get_nested(vcpu->kvm, lpid, false);
 	if (!nested_guest)
 		return U_P4;
 
-	new.base_gfn = gpa >> SVM_PAGE_SHIFT;
-	new.npages = nbytes >> SVM_PAGE_SHIFT;
+	new.base_gfn = gpa >> PAGE_SHIFT;
+	new.npages = nbytes >> PAGE_SHIFT;
 	new.id = slot_id;
 
 	spin_lock(&nested_guest->slots_lock);
-	r = kvmppc_update_nested_memslots(&nested_guest->memslots, &new);
+	r = kvmppc_insert_nested_memslot(nested_guest, &new);
 	spin_unlock(&nested_guest->slots_lock);
 
 	if (r < 0)
