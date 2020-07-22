@@ -939,15 +939,18 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	struct kvm_vcpu *vcpu = uv_esm->vcpu;
 	unsigned long kbase = kvmppc_get_gpr(vcpu, 4);
 	unsigned long fdt = kvmppc_get_gpr(vcpu, 5);
-	unsigned long r, ret = U_SUCCESS;
+	unsigned long r;
+	// not documented
+	unsigned long ret = U_FUNCTION;
 
 	if (!kbase) {
-		ret = U_P2;
+		// not documented
+		ret = U_PARAMETER;
 		goto out;
 	}
 
 	if (!fdt) {
-		ret = U_P3;
+		ret = U_P2;
 		goto out;
 	}
 
