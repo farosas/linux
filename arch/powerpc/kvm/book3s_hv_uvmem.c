@@ -1362,6 +1362,211 @@ static void test_memslot_registration(struct kvm_nested_guest *gp)
 	printk(KERN_DEBUG "end test\n");
 }
 
+static void print_slots(struct kvm_nested_guest *gp)
+{
+	struct kvm_memory_slot *m;
+	struct kvm_nested_memslots *s = gp->memslots;
+
+	printk(KERN_DEBUG "memslots:");
+	printk(KERN_DEBUG " -> (%px=%d)\n", s, s->used_slots);
+/*
+{
+	int i;
+	for (i = 0; i < KVM_MEM_SLOTS_NUM; i++) {
+		printk(KERN_CONT " -> id %d=%d", i, s->id_to_index[i]);
+	}
+	printk(KERN_CONT " | ");
+}
+*/
+
+	spin_lock(&gp->slots_lock);
+	kvm_for_each_memslot(m, s) {
+		printk(KERN_CONT " -> (%d=%d,%llx,%ld)", s->id_to_index[m->id], m->id, m->base_gfn, m->npages);
+	}
+	spin_unlock(&gp->slots_lock);
+	printk(KERN_DEBUG "# memslots\n");
+}
+
+int __test_insert_memslot(struct kvm_nested_guest *gp, short slot_id)
+{
+	struct kvm_memory_slot new;
+	unsigned long nbytes;
+	gpa_t gpa;
+	int r;
+
+	get_random_bytes(&gpa, sizeof(gpa));
+	get_random_bytes(&nbytes, sizeof(nbytes));
+
+	new.base_gfn = gpa;
+	new.npages = (nbytes % 100) + 1;
+	new.id = slot_id;
+
+	r = kvmppc_insert_nested_memslot(gp, &new);
+	return r;
+}
+
+int __test_remove_memslot(struct kvm_nested_guest *gp, short slot_id)
+{
+	int r;
+
+	r = kvmppc_remove_nested_memslot(gp, slot_id);
+	return r;
+}
+
+bool test_memslot_remove_all(struct kvm_nested_guest *gp)
+{
+	int r, i;
+	int nslots = gp->memslots->used_slots;
+
+	printk(KERN_DEBUG "remove all\n");
+	for (i=0; i < nslots; i++) {
+		r = __test_remove_memslot(gp, i);
+		if (r < 0)
+			return false;
+	}
+	return true;
+}
+
+bool test_memslot_insert_range_random(struct kvm_nested_guest *gp, int start, int end)
+{
+	int i, r;
+
+	printk(KERN_DEBUG "insert range %d-%d\n", start, end);
+	for (i=start; i < end; i++) {
+		r = __test_insert_memslot(gp, i);
+		if (r < 0)
+			return false;
+	}
+	return true;
+}
+
+bool test_memslot_insert_half(struct kvm_nested_guest *gp)
+{
+	return test_memslot_insert_range_random(gp, 0, KVM_MEM_SLOTS_NUM/2);
+}
+
+bool test_memslot_insert_all(struct kvm_nested_guest *gp)
+{
+	return test_memslot_insert_range_random(gp, 0, KVM_MEM_SLOTS_NUM);
+}
+
+bool test_memslot_insert_all_out_of_bounds(struct kvm_nested_guest *gp)
+{
+	return !test_memslot_insert_range_random(gp, 0, KVM_MEM_SLOTS_NUM + 2);
+}
+
+bool test_memslot_order(struct kvm_nested_guest *gp)
+{
+	struct kvm_memory_slot *tmp, *next;
+	struct kvm_nested_memslots *slots;
+	int i;
+
+	printk(KERN_DEBUG "check order\n");
+	spin_lock(&gp->slots_lock);
+	slots = gp->memslots;
+	for (i = 0; i < slots->used_slots - 1; i++) {
+		tmp = &slots->memslots[i];
+		next = &slots->memslots[i + 1];
+
+		if (tmp->base_gfn <= next->base_gfn) {
+			spin_unlock(&gp->slots_lock);
+			return false;
+		}
+	}
+	spin_unlock(&gp->slots_lock);
+	return true;
+}
+
+bool test_memslot_move(struct kvm_nested_guest *gp)
+{
+	int i, r;
+	short slot_id;
+
+	printk(KERN_DEBUG "insert all sorted\n");
+	for (i=0; i < KVM_MEM_SLOTS_NUM; i++) {
+		struct kvm_memory_slot new;
+
+		new.base_gfn = i * 100;
+		new.npages = 2;
+		new.id = i;
+
+		r = kvmppc_insert_nested_memslot(gp, &new);
+		if (r < 0)
+			return false;
+	}
+	slot_id = gp->memslots->used_slots - 7;
+	printk(KERN_DEBUG "move id=%d\n", slot_id);
+	{
+		struct kvm_memory_slot new;
+		gpa_t gpa = 512 * 100;
+		unsigned long nbytes = 100;
+
+		new.base_gfn = gpa;
+		new.npages = nbytes;
+		new.id = slot_id;
+
+		r = kvmppc_insert_nested_memslot(gp, &new);
+		if (r < 0)
+			return false;
+	}
+
+	return true;
+}
+
+bool test_memslot_clash(struct kvm_nested_guest *gp)
+{
+	int r;
+
+	printk(KERN_DEBUG "clash id=1\n");
+	{
+		struct kvm_memory_slot new;
+		gpa_t gpa = 3 * 100;
+		unsigned long nbytes = 100;
+
+		new.base_gfn = gpa;
+		new.npages = nbytes;
+		new.id = 1;
+
+		r = kvmppc_insert_nested_memslot(gp, &new);
+		if (r < 0)
+			return true;
+	}
+	return false;
+}
+
+static void test_memslot_registration(struct kvm_nested_guest *gp)
+{
+	int i;
+	bool r;
+	bool (*tests [])(struct kvm_nested_guest *gp) = {
+		test_memslot_insert_all,
+		test_memslot_order,
+		test_memslot_remove_all,
+		test_memslot_insert_all_out_of_bounds,
+		test_memslot_order,
+		test_memslot_remove_all,
+		test_memslot_insert_half,
+		test_memslot_order,
+		test_memslot_remove_all,
+		test_memslot_move,
+		test_memslot_order,
+		test_memslot_clash,
+		test_memslot_order,
+		test_memslot_remove_all,
+	};
+
+	printk(KERN_DEBUG "pre-test\n");
+	for (i=0; i < ARRAY_SIZE(tests); i++) {
+		r = tests[i](gp);
+		print_slots(gp);
+		if (!r) {
+			WARN_ON(1);
+			break;
+		}
+	}
+	printk(KERN_DEBUG "end test\n");
+}
+
 /*
  * Handle the UV_REGISTER_MEM_SLOT ucall.
  * r4 = L1 lpid of secure guest
@@ -1402,7 +1607,6 @@ unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu, unsigned int lpi
 
 	spin_lock(&nested_guest->slots_lock);
 	r = kvmppc_insert_nested_memslot(nested_guest, &new);
-	spin_unlock(&nested_guest->slots_lock);
 */
 	if (r < 0)
 		ret = U_P2;
