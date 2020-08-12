@@ -90,9 +90,11 @@
 #include <linux/migrate.h>
 #include <linux/kvm_host.h>
 #include <linux/ksm.h>
+#include <linux/bsearch.h>
 #include <asm/ultravisor.h>
 #include <asm/mman.h>
 #include <asm/kvm_ppc.h>
+#include <asm/pte-walk.h>
 
 static struct dev_pagemap kvmppc_uvmem_pgmap;
 static unsigned long *kvmppc_uvmem_bitmap;
@@ -846,6 +848,23 @@ void kvmppc_uvmem_free(void)
 	kfree(kvmppc_uvmem_bitmap);
 }
 
+static bool uv_gfn_rmap_valid(unsigned long rmap)
+{
+	return ((rmap & KVMPPC_RMAP_TYPE_MASK) == KVMPPC_RMAP_UV_GFN);
+}
+
+static enum uv_gpf_state uv_gfn_state(unsigned long rmap)
+{
+	if (uv_gfn_rmap_valid(rmap))
+		return rmap & KVMPPC_RMAP_UV_GPF_STATE_MASK;
+	return GPF_SECURE;
+}
+
+static void uv_gfn_set_state(unsigned long *rmap, enum uv_gpf_state state)
+{
+	*rmap |= KVMPPC_RMAP_UV_GFN | (state & KVMPPC_RMAP_UV_GPF_STATE_MASK);
+}
+
 unsigned long kvmppc_uv_esm(void)
 {
 	return U_UNSUPPORTED;
@@ -990,6 +1009,24 @@ static int __find_memslot_position(struct kvm_nested_memslots *slots,
 	return pos;
 }
 
+static int nested_memslots_cmp(const void *key, const void *elt)
+{
+	gfn_t *gfn = (gfn_t *)key;
+	struct kvm_memory_slot *memslot = (struct kvm_memory_slot *)elt;
+
+	if (*gfn >= memslot->base_gfn + memslot->npages)
+		return -1;
+	if (*gfn < memslot->base_gfn)
+		return 1;
+	return 0;
+}
+
+static struct kvm_memory_slot *gfn_to_nested_memslot(struct kvm_nested_memslots *slots, gfn_t gfn)
+{
+	return bsearch(&gfn, slots->memslots, ARRAY_SIZE(slots->memslots),
+		       sizeof(struct kvm_memory_slot), nested_memslots_cmp);
+}
+
 static int update_nested_slots(struct kvm_nested_guest *gp,
 			       const struct kvm_memory_slot *old,
 			       struct kvm_memory_slot *new)
@@ -1131,5 +1168,235 @@ unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int l
 		ret = U_P2;
 
 	kvmhv_put_nested(nested_guest);
+	return ret;
+}
+
+static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
+				       struct kvm_nested_guest *gp,
+				       gpa_t gpa, gpa_t n_gpa,
+				       struct kvm_memory_slot *memslot,
+				       struct kvm_memory_slot *n_memslot,
+				       unsigned long page_shift)
+{
+	struct kvm *kvm = vcpu->kvm;
+	pte_t pte, *ptep;
+	struct rmap_nested *n_rmap;
+	unsigned long mmu_seq, *rmapp;
+	gfn_t gfn, n_gfn;
+	int r;
+
+
+	gfn = gpa >> PAGE_SHIFT;
+	n_gfn = n_gpa >> page_shift;
+
+	/* Look for gra -> hra translation in our partition scoped tables for l1 */
+
+	pte = __pte(0);
+	spin_lock(&kvm->mmu_lock);
+	ptep = find_kvm_secondary_pte(kvm, gpa, NULL);
+	if (ptep)
+		pte = *ptep;
+	spin_unlock(&kvm->mmu_lock);
+
+	if (!pte_present(pte)) {
+		r = kvmppc_book3s_instantiate_page(vcpu, gpa, memslot, true,
+						   false, &pte, NULL);
+		if (r) {
+			return U_P2;
+		}
+	}
+
+	/* Unmap gra -> hra so that l1 cannot directly access l2's memory */
+
+	spin_lock(&kvm->mmu_lock);
+	kvm_unmap_radix(kvm, memslot, gfn);
+	spin_unlock(&kvm->mmu_lock);
+
+	/* Look for n_gra -> hra translation in the shadow page table for l2 */
+	spin_lock(&kvm->mmu_lock);
+	ptep = find_kvm_nested_guest_pte(kvm, gp->l1_lpid, n_gpa, NULL);
+	spin_unlock(&kvm->mmu_lock);
+	if (ptep) {
+		if (pte_present(*ptep))
+			return U_SUCCESS;
+	}
+
+	/* Insert new n_gra -> hra pte in the shadow page table for l2 */
+
+	mmu_seq = kvm->mmu_notifier_seq;
+	smp_rmb();
+
+	n_rmap = kzalloc(sizeof(*n_rmap), GFP_KERNEL);
+	if (!n_rmap) {
+		printk_ratelimited(KERN_DEBUG "n_rmap\n");
+		return U_NO_MEM;
+	}
+	n_rmap->rmap = (n_gpa & RMAP_NESTED_GPA_MASK) |
+		(((unsigned long) gp->l1_lpid) << RMAP_NESTED_LPID_SHIFT);
+	rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
+	r = kvmppc_create_pte(kvm, gp->shadow_pgtable, pte, n_gpa, 0,
+			      mmu_seq, gp->shadow_lpid, rmapp, &n_rmap);
+	kfree(n_rmap);
+	if (r || !pte_present(pte))
+		return U_BUSY;
+
+	uv_gfn_set_state(&n_memslot->arch.rmap[n_gfn], GPF_SECURE);
+	return U_SUCCESS;
+}
+
+static unsigned long kvmppc_uv_page_out(struct kvm_vcpu *vcpu,
+					struct kvm_nested_guest *gp,
+					gpa_t gpa, gpa_t n_gpa,
+					struct kvm_memory_slot *memslot,
+					struct kvm_memory_slot *n_memslot,
+					unsigned long page_shift)
+{
+	struct kvm *kvm = vcpu->kvm;
+	pte_t pte, *ptep;
+	gfn_t gfn, n_gfn;
+	enum uv_gpf_state gpf_state;
+	int r;
+
+	gfn = gpa >> PAGE_SHIFT;
+	n_gfn = n_gpa >> page_shift;
+
+	gpf_state = uv_gfn_state(n_memslot->arch.rmap[n_gfn]);
+
+	if (gpf_state == GPF_HV_UNSHARED)
+		return U_RETRY;
+
+	if (gpf_state != GPF_SECURE)
+		return U_P3;
+
+	/* Invalidate shadow pte if it exists */
+
+	kvmhv_invalidate_shadow_pte(vcpu, gp, n_gpa, NULL);
+
+	/* Reinstate gra -> hra translation in our partition scoped tables for l1 */
+
+	pte = __pte(0);
+	spin_lock(&kvm->mmu_lock);
+	ptep = find_kvm_secondary_pte(kvm, gpa, NULL);
+	if (ptep)
+		pte = *ptep;
+	spin_unlock(&kvm->mmu_lock);
+
+	if (!pte_present(pte)) {
+		r = kvmppc_book3s_instantiate_page(vcpu, gpa, memslot, true,
+						   false, &pte, NULL);
+		if (r)
+			return U_P2;
+	}
+
+	uv_gfn_set_state(&n_memslot->arch.rmap[n_gfn], GPF_PAGEDOUT);
+
+	return U_SUCCESS;
+}
+
+/*
+ * Handle the UV_PAGE_IN/OUT ucalls.
+ * r4 = L1 lpid of secure guest
+ * r5 = L1 gpa
+ * r6 = L2 gpa
+ * r7 = flags
+ * r8 = order
+ */
+unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
+				      unsigned int lpid,
+				      gpa_t gpa, gpa_t n_gpa,
+				      unsigned long flags,
+				      unsigned long order)
+{
+	struct kvm *kvm = vcpu->kvm;
+	struct kvm_nested_guest *gp;
+	struct kvm_memory_slot *memslot, *n_memslot;
+	unsigned long ret;
+	gfn_t gfn, n_gfn;
+
+	if (order != PAGE_SHIFT) {
+		ret = U_P4;
+		goto out;
+	}
+
+	gp = kvmhv_get_nested(kvm, lpid, false);
+	if (!gp)
+		return U_PARAMETER;
+
+	gfn = gpa >> PAGE_SHIFT;
+	memslot = gfn_to_memslot(kvm, gfn);
+	if (!memslot || (memslot->flags & KVM_MEMSLOT_INVALID)) {
+		ret = U_P2;
+		goto out;
+	}
+
+	n_gfn = n_gpa >> order;
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID)) {
+		ret = U_P3;
+		goto out;
+	}
+
+	switch (op) {
+	case UV_PAGE_IN:
+		ret = kvmppc_uv_page_in(vcpu, gp, gpa, n_gpa,
+					memslot, n_memslot, order);
+		break;
+	case UV_PAGE_OUT:
+		ret = kvmppc_uv_page_out(vcpu, gp, gpa, n_gpa,
+					 memslot, n_memslot, order);
+		break;
+	}
+
+out:
+	kvmhv_put_nested(gp);
+	return ret;
+}
+
+/*
+ * Handle the UV_PAGE_INVAL ucall.
+ * r4 = L1 lpid of secure guest
+ * r5 = L1 gpa
+ * r8 = order
+ */
+unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid,
+				   gpa_t n_gpa, unsigned long order)
+{
+	unsigned long ret = U_P2;
+	struct kvm *kvm = vcpu->kvm;
+	struct kvm_memory_slot *n_memslot;
+	struct kvm_nested_guest *gp;
+	enum uv_gpf_state gpf_state;
+	gfn_t n_gfn;
+
+	if (order != PAGE_SHIFT)
+		return U_P3;
+
+	gp = kvmhv_get_nested(kvm, lpid, false);
+	if (!gp)
+		return U_PARAMETER;
+
+	n_gfn = n_gpa >> order;
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID))
+		goto out;
+
+	gpf_state = uv_gfn_state(n_memslot->arch.rmap[n_gfn]);
+
+//	vcpu_debug(vcpu, "%s lpid=%d gpa=%#llx n_gpa=%#lx state=%#x page_shift=%#lx", __func__, lpid, gpa, n_gpa, (int)gpf_state, order);
+
+	switch (uv_gpf_state_generic(gpf_state)) {
+	case GPF_SHARED:
+		kvmhv_invalidate_shadow_pte(vcpu, gp, n_gpa, NULL);
+		uv_gfn_set_state(&n_memslot->arch.rmap[n_gfn], gpf_state + 1);
+		break;
+	case GPF_SHARED_INV:
+		break;
+	default:
+		goto out;
+	}
+
+	ret = U_SUCCESS;
+out:
+	kvmhv_put_nested(gp);
 	return ret;
 }

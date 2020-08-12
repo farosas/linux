@@ -116,10 +116,50 @@ struct rmap_nested {
 			 (pos)->list.next)), true);			       \
 	     (pos) = llist_entry((node), typeof(*(pos)), list))
 
+enum uv_gpf_state {
+	GPF_SECURE,
+	GPF_PAGEDOUT,
+	GPF_SHARED,
+	GPF_SHARED_INV,
+	GPF_SHARED_IMPLICIT,
+	GPF_SHARED_IMPLICIT_INV,
+	GPF_HV_SHARING,
+	GPF_HV_SHARED,
+	GPF_HV_SHARED_INV,
+	GPF_HV_UNSHARING,
+	GPF_HV_UNSHARING_INV,
+	GPF_HV_UNSHARED,
+	GPF_PSEUDO_SHARED,
+	GPF_PSEUDO_SHARED_INV,
+};
+
+static inline enum uv_gpf_state uv_gpf_state_generic(enum uv_gpf_state state)
+{
+	switch (state) {
+	case GPF_SHARED:
+	case GPF_SHARED_IMPLICIT:
+	case GPF_HV_SHARED:
+	case GPF_HV_UNSHARING:
+	case GPF_PSEUDO_SHARED:
+		return GPF_SHARED;
+	case GPF_SHARED_INV:
+	case GPF_SHARED_IMPLICIT_INV:
+	case GPF_HV_SHARED_INV:
+	case GPF_HV_UNSHARING_INV:
+	case GPF_PSEUDO_SHARED_INV:
+		return GPF_SHARED_INV;
+	default:
+		return state;
+	}
+}
+
 struct kvm_nested_guest *kvmhv_get_nested(struct kvm *kvm, int l1_lpid,
 					  bool create);
 void kvmhv_put_nested(struct kvm_nested_guest *gp);
 int kvmhv_nested_next_lpid(struct kvm *kvm, int lpid);
+bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
+				 struct kvm_nested_guest *gp,
+				 long gpa, int *shift_ret);
 
 /* Encoding of first parameter for H_TLB_INVALIDATE */
 #define H_TLBIE_P1_ENC(ric, prs, r)	(___PPC_RIC(ric) | ___PPC_PRS(prs) | \
