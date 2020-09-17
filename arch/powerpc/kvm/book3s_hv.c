@@ -75,6 +75,7 @@
 #include <asm/kvm_book3s_uvmem.h>
 #include <asm/ultravisor.h>
 #include <asm/ultravisor-api.h>
+#include <asm/kvm_book3s_uv.h>
 
 #include "book3s.h"
 
@@ -925,13 +926,54 @@ static int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
 					      (gpa_t)kvmppc_get_gpr(vcpu, 6),
 					      kvmppc_get_gpr(vcpu, 7),
 					      kvmppc_get_gpr(vcpu, 8));
+		if (ret)
+			vcpu_debug(vcpu, "UV_PAGE_%s failed", req == UV_PAGE_IN ? "IN" : "OUT");
 		break;
 	case UV_PAGE_INVAL:
 		ret = kvmppc_uv_invalidate(vcpu,
 					   (unsigned int)kvmppc_get_gpr(vcpu, 4),
 					   (gpa_t)kvmppc_get_gpr(vcpu, 5),
 					   kvmppc_get_gpr(vcpu, 6));
+//		if (ret)
+//			vcpu_debug(vcpu, "UV_PAGE_INVAL failed");
 		break;
+	case UV_WRITE_PATE:
+		vcpu_debug(vcpu, "UV_WRITE_PATE\n");
+		break;
+	case UV_SHARE_PAGE:
+		vcpu_debug(vcpu, "UV_SHARE_PAGE\n");
+		break;
+	case UV_UNSHARE_PAGE:
+		vcpu_debug(vcpu, "UV_UNSHARE_PAGE\n");
+		break;
+	case UV_RETURN:
+		vcpu_debug(vcpu, "UV_RETURN\n");
+		break;
+	case UV_RESTRICTED_SPR_WRITE:
+		vcpu_debug(vcpu, "UV_RESTRICTED_SPR_WRITE\n");
+		break;
+	case UV_RESTRICTED_SPR_READ:
+		vcpu_debug(vcpu, "UV_RESTRICTED_SPR_READ\n");
+		break;
+	case UV_READ_SCOM:
+		vcpu_debug(vcpu, "UV_READ_SCOM\n");
+		break;
+	case UV_WRITE_SCOM:
+		vcpu_debug(vcpu, "UV_WRITE_SCOM\n");
+		break;
+	case UV_SVM_TERMINATE:
+		vcpu_debug(vcpu, "SVM_TERMINATE\n");
+		break;
+	case UV_READ_MEM:
+		vcpu_debug(vcpu, "UV_READ_MEM\n");
+		break;
+	case UV_WRITE_MEM:
+		vcpu_debug(vcpu, "UV_WRITE_MEM\n");
+		break;
+	case UV_SEND_SBE_COMMAND:
+		vcpu_debug(vcpu, "UV_SEND_SBE_COMMAND\n");
+		break;
+
 	default:
 		return RESUME_HOST;
 	}
@@ -1450,9 +1492,9 @@ static int kvmppc_handle_exit_hv(struct kvm_vcpu *vcpu,
 	 */
 	case BOOK3S_INTERRUPT_H_EMUL_ASSIST:
 		if (vcpu->arch.emul_inst != KVM_INST_FETCH_FAILED)
-			vcpu->arch.last_inst = kvmppc_need_byteswap(vcpu) ?
-				swab32(vcpu->arch.emul_inst) :
-				vcpu->arch.emul_inst;
+			vcpu->arch.last_inst = kvmppc_need_byteswap(vcpu) ? swab32(vcpu->arch.emul_inst) : vcpu->arch.emul_inst;
+
+		printk(KERN_DEBUG "e40 at %#lx last_inst=%#x", kvmppc_get_pc(vcpu), vcpu->arch.last_inst);
 		if (vcpu->guest_debug & KVM_GUESTDBG_USE_SW_BP) {
 			r = kvmppc_emulate_debug_inst(vcpu);
 		} else {
@@ -1598,6 +1640,16 @@ static int kvmppc_handle_nested_exit(struct kvm_vcpu *vcpu)
 		break;
 	case BOOK3S_INTERRUPT_SYSCALL:
 		vcpu->run->exit_reason = KVM_EXIT_PAPR_HCALL;
+		r = RESUME_HOST;
+		break;
+	case BOOK3S_INTERRUPT_PROGRAM:
+		printk(KERN_DEBUG "nested program interrupt at=%#lx\n", kvmppc_get_pc(vcpu));
+		r = RESUME_HOST;
+		break;
+	case BOOK3S_INTERRUPT_H_EMUL_ASSIST:
+		printk(KERN_DEBUG "e40 at nested %#lx srr0=%#llx srr1=%#llx last_inst=%#x\n",
+		       kvmppc_get_pc(vcpu), kvmppc_get_srr0(vcpu), kvmppc_get_srr1(vcpu),
+		       vcpu->arch.emul_inst);
 		r = RESUME_HOST;
 		break;
 	default:

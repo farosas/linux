@@ -28,16 +28,13 @@ static inline bool kvmhv_on_pseries(void)
 }
 #endif
 
+#ifdef CONFIG_PPC_UV_EMULATE
 struct kvm_nested_memslots {
 	int used_slots;
 	short id_to_index[KVM_MEM_SLOTS_NUM];
 	struct kvm_memory_slot memslots[KVM_MEM_SLOTS_NUM];
 };
-
-enum svm_state {
-	SVM_SECURE = 1,
-	SVM_ABORT,
-};
+#endif
 
 /*
  * Structure for a nested guest, that is, for a guest that is managed by
@@ -57,9 +54,11 @@ struct kvm_nested_guest {
 	cpumask_t cpu_in_guest;
 	short prev_cpu[NR_CPUS];
 	u8 radix;			/* is this nested guest radix */
+#ifdef CONFIG_PPC_UV_EMULATE
 	enum svm_state svm_state;
 	struct mutex slots_lock;
 	struct kvm_nested_memslots *memslots; /* for L0's tracking of memslots */
+#endif
 };
 
 /*
@@ -121,43 +120,6 @@ struct rmap_nested {
 			 ((struct llist_node *) ((pos) = NULL)) :	       \
 			 (pos)->list.next)), true);			       \
 	     (pos) = llist_entry((node), typeof(*(pos)), list))
-
-enum uv_gpf_state {
-	GPF_SECURE,
-	GPF_PAGEDOUT,
-	GPF_SHARED,
-	GPF_SHARED_INV,
-	GPF_SHARED_IMPLICIT,
-	GPF_SHARED_IMPLICIT_INV,
-	GPF_HV_SHARING,
-	GPF_HV_SHARED,
-	GPF_HV_SHARED_INV,
-	GPF_HV_UNSHARING,
-	GPF_HV_UNSHARING_INV,
-	GPF_HV_UNSHARED,
-	GPF_PSEUDO_SHARED,
-	GPF_PSEUDO_SHARED_INV,
-};
-
-static inline enum uv_gpf_state uv_gpf_state_generic(enum uv_gpf_state state)
-{
-	switch (state) {
-	case GPF_SHARED:
-	case GPF_SHARED_IMPLICIT:
-	case GPF_HV_SHARED:
-	case GPF_HV_UNSHARING:
-	case GPF_PSEUDO_SHARED:
-		return GPF_SHARED;
-	case GPF_SHARED_INV:
-	case GPF_SHARED_IMPLICIT_INV:
-	case GPF_HV_SHARED_INV:
-	case GPF_HV_UNSHARING_INV:
-	case GPF_PSEUDO_SHARED_INV:
-		return GPF_SHARED_INV;
-	default:
-		return state;
-	}
-}
 
 struct kvm_nested_guest *kvmhv_get_nested(struct kvm *kvm, int l1_lpid,
 					  bool create);

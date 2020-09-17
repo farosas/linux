@@ -1,0 +1,11 @@
+#/bin/bash
+
+set -e
+set -u
+set -x
+
+modprobe -r kvm-hv kvm
+make modules -j$(nproc) O=$(pwd)/build/ INSTALL_MOD_PATH=$(pwd)/build
+make modules_install -j$(nproc) O=$(pwd)/build/ INSTALL_MOD_PATH=$(pwd)/build
+modprobe -v -d build kvm-hv --set-version 5.8.0+
+su root -c 'echo ======= > /dev/kmsg'

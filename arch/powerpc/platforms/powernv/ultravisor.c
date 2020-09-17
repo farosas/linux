@@ -9,6 +9,8 @@
 #include <linux/printk.h>
 #include <linux/of_fdt.h>
 #include <linux/of.h>
+#include <linux/libfdt.h>
+#include <linux/slab.h>
 
 #include <asm/ultravisor.h>
 #include <asm/firmware.h>
@@ -67,3 +69,175 @@ static int __init uv_init(void)
 	return sysfs_create_bin_file(ultravisor_kobj, &uv_msglog_attr);
 }
 machine_subsys_initcall(powernv, uv_init);
+
+static u32 uv_fdt_get_cell(const struct fdt_property *prop, unsigned int i)
+{
+	if (prop->len >= (i + 1) * sizeof(u32))
+		return fdt32_to_cpu(((const u32 *)prop->data)[i]);
+	return 0;
+}
+
+static int uv_get_rma(unsigned long *fdt, u64 *rma)
+{
+	const struct fdt_property *prop;
+	int prop_len;
+	u64 base, size;
+	int offset;
+
+	offset = fdt_path_offset(fdt, "/memory@0");
+	if (offset < 0)
+		return -ENOENT;
+
+	prop = fdt_get_property(fdt, offset, "reg", &prop_len);
+
+	if (!prop || prop_len < 2 * sizeof(u64))
+		return -ENOENT;
+
+
+	base = ((u64)uv_fdt_get_cell(prop, 0) << 32) | uv_fdt_get_cell(prop, 1);
+	size = ((u64)uv_fdt_get_cell(prop, 2) << 32) | uv_fdt_get_cell(prop, 3);
+
+	if (base)
+		return -EINVAL;
+
+	/* RMA is capped at 768 MB */
+	*rma = min(0x30000000ull, size);
+	return 0;
+}
+
+#define FDT_ALIGN(x, a)	(((x) + (a) - 1) & ~((a) - 1))
+static void uv_fdt_print(unsigned long *afdt)
+{
+	int i, rc;
+	struct fdt_header *fdt;
+
+	fdt = (struct fdt_header *) afdt;
+
+	printk(KERN_INFO "%s\n\n", __func__);
+
+	printk(KERN_INFO "magic 0x%x\n", fdt_magic(fdt));
+	printk(KERN_INFO "totalsize 0x%x\n", fdt_totalsize(fdt));
+	printk(KERN_INFO "off_dt_struct 0x%x\n", fdt_off_dt_struct(fdt));
+	printk(KERN_INFO "off_dt_strings 0x%x\n", fdt_off_dt_strings(fdt));
+	printk(KERN_INFO "off_mem_rsvmap 0x%x\n", fdt_off_mem_rsvmap(fdt));
+	printk(KERN_INFO "version 0x%x\n", fdt_version(fdt));
+	printk(KERN_INFO "last_comp_version 0x%x\n", fdt_last_comp_version(fdt));
+	printk(KERN_INFO "boot_cpuid_phys 0x%x\n", fdt_boot_cpuid_phys(fdt));
+	printk(KERN_INFO "size_dt_strings 0x%x\n", fdt_size_dt_strings(fdt));
+	printk(KERN_INFO "size_dt_struct 0x%x\n", fdt_size_dt_struct(fdt));
+
+	for (i = 0; i < fdt_num_mem_rsv(fdt); i++) {
+		u64 addr, size;
+
+		rc = fdt_get_mem_rsv(fdt, i, &addr, &size);
+		if (rc) {
+			printk(KERN_INFO " ERR %s\n", fdt_strerror(rc));
+			return;
+		}
+		printk(KERN_INFO "  mem_rsv[%i] = %lx@%#lx\n",
+		       i, (long)size, (long)addr);
+	}
+
+	if (fdt_off_mem_rsvmap(fdt) < FDT_ALIGN(sizeof(struct fdt_header), 8)) {
+		printk(KERN_INFO "rsvmap not aligned\n");
+	}
+
+	if (fdt_off_dt_struct(fdt) <
+			(fdt_off_mem_rsvmap(fdt) +
+			 sizeof(struct fdt_reserve_entry))) {
+		printk(KERN_INFO "dt_struct before rsvmap\n");
+	}
+
+	if (fdt_off_dt_strings(fdt) < (fdt_off_dt_struct(fdt) +
+				fdt_size_dt_struct(fdt))) {
+		printk(KERN_INFO "dt_strings before dt_struct\n");
+	}
+
+	if (fdt_totalsize(fdt) <
+			(fdt_off_dt_strings(fdt) + fdt_size_dt_strings(fdt))) {
+		printk(KERN_INFO "totalsize < size of dt_strings\n");
+	}
+	printk(KERN_INFO "%s end\n\n", __func__);
+}
+
+int uv_fdt_reserve_mem(u64 hpa_fdt, unsigned int npages, unsigned int page_size, u64 *rsv_addr)
+{
+	unsigned long *new_fdt, *fdt = __va(hpa_fdt);
+	u64 rma_top, addr;
+	int r, i, n_regions;
+	size_t size, buf_size, fdt_size;
+
+	r = fdt_check_header(fdt);
+	if (r < 0)
+		return -EINVAL;
+
+	uv_fdt_print(fdt);
+
+	r = uv_get_rma(fdt, &rma_top);
+	if (r < 0) {
+		printk(KERN_INFO "%s get rma failed ret=%d\n", __func__, r);
+		return r;
+	}
+
+	size = npages * page_size;
+
+	/*
+	 *  Starting from the top of the RMA, adjust the address until
+	 *  there are no overlaps with reserved memory regions.
+	 */
+	addr = rma_top - size;
+	n_regions = fdt_num_mem_rsv(fdt);
+
+	for (i = n_regions - 1; i >= 0; i--) {
+		u64 raddr, rsize;
+
+		r = fdt_get_mem_rsv(fdt, i, &raddr, &rsize);
+		if(r)
+			return -EINVAL;
+
+		if ((addr + size > raddr) && (addr < raddr + rsize)) {
+			/* overlap, start over */
+			addr = raddr - size;
+			i = n_regions;
+		}
+	}
+
+	/*
+	 * Move the device-tree to another location within L0 memory,
+	 * perform the necessary changes and copy it back.
+	 */
+
+	fdt_size = fdt_totalsize(fdt);
+
+	new_fdt = kmalloc(fdt_size, GFP_KERNEL);
+	if (!new_fdt)
+		return -ENOMEM;
+
+	r = fdt_open_into(fdt, new_fdt, buf_size);
+	if (r)
+		goto out_free;
+
+	r = fdt_add_mem_rsv(new_fdt, addr, size);
+	if (r)
+		goto out_free;
+
+	fdt_pack(new_fdt);
+
+	uv_fdt_print(new_fdt);
+
+	r = fdt_move(new_fdt, fdt, fdt_size);
+	if (r) {
+		printk(KERN_INFO "%s failed to write dt ret=%d\n", __func__, r);
+		goto out_free;
+	}
+
+	uv_fdt_print(fdt);
+
+	*rsv_addr = addr;
+
+	r = 0;
+out_free:
+	kfree(new_fdt);
+	return r;
+}
+EXPORT_SYMBOL_GPL(uv_fdt_reserve_mem);

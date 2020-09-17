@@ -1,0 +1,16 @@
+diff --git b/arch/powerpc/kvm/book3s_hv_uvmem.c a/arch/powerpc/kvm/book3s_hv_uvmem.c
+index be1808bda113..0a0b74c405c7 100644
+--- b/arch/powerpc/kvm/book3s_hv_uvmem.c
++++ a/arch/powerpc/kvm/book3s_hv_uvmem.c
+@@ -1304,6 +1304,11 @@ unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
+ 	if (!gp)
+ 		return U_PARAMETER;
+ 
++	if (gp->svm_state == SVM_ABORT) {
++		ret = U_STATE;
++		goto out;
++	}
++
+ 	gfn = gpa >> PAGE_SHIFT;
+ 	memslot = gfn_to_memslot(kvm, gfn);
+ 	if (!memslot || (memslot->flags & KVM_MEMSLOT_INVALID)) {

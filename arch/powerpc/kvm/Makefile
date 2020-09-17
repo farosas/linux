@@ -3,7 +3,7 @@
 # Makefile for Kernel-based Virtual Machine module
 #
 
-ccflags-y := -Ivirt/kvm -Iarch/powerpc/kvm
+ccflags-y := -Ivirt/kvm -Iarch/powerpc/kvm -DDEBUG
 KVM := ../../../virt/kvm
 
 common-objs-y = $(KVM)/kvm_main.o $(KVM)/eventfd.o
@@ -73,6 +73,9 @@ kvm-hv-y += \
 
 kvm-hv-$(CONFIG_PPC_UV) += \
 	book3s_hv_uvmem.o
+
+kvm-hv-$(CONFIG_PPC_UV_EMULATE) += \
+	book3s_hv_uv.o
 
 kvm-hv-$(CONFIG_PPC_TRANSACTIONAL_MEM) += \
 	book3s_hv_tm.o
