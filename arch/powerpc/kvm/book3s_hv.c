@@ -75,6 +75,7 @@
 #include <asm/kvm_book3s_uvmem.h>
 #include <asm/ultravisor.h>
 #include <asm/ultravisor-api.h>
+#include <asm/kvm_book3s_uv.h>
 
 #include "book3s.h"
 
