@@ -28,16 +28,13 @@ static inline bool kvmhv_on_pseries(void)
 }
 #endif
 
+#ifdef CONFIG_PPC_UV_EMULATE
 struct kvm_nested_memslots {
 	int used_slots;
 	short id_to_index[KVM_MEM_SLOTS_NUM];
 	struct kvm_memory_slot memslots[KVM_MEM_SLOTS_NUM];
 };
-
-enum svm_state {
-	SVM_SECURE = 1,
-	SVM_ABORT,
-};
+#endif
 
 /*
  * Structure for a nested guest, that is, for a guest that is managed by
@@ -57,9 +54,11 @@ struct kvm_nested_guest {
 	cpumask_t cpu_in_guest;
 	short prev_cpu[NR_CPUS];
 	u8 radix;			/* is this nested guest radix */
+#ifdef CONFIG_PPC_UV_EMULATE
 	enum svm_state svm_state;
 	struct mutex slots_lock;
 	struct kvm_nested_memslots *memslots; /* for L0's tracking of memslots */
+#endif
 };
 
 /*

@@ -19,7 +19,7 @@
 #include <asm/pgalloc.h>
 #include <asm/pte-walk.h>
 #include <asm/reg.h>
-#include <asm/kvm_book3s_uvmem.h>
+#include <asm/kvm_book3s_uv.h>
 #include <asm/ultravisor-api.h>
 
 static struct patb_entry *pseries_partition_tb;
@@ -217,31 +217,6 @@ static void kvmhv_nested_mmio_needed(struct kvm_vcpu *vcpu, u64 regs_ptr)
 	}
 }
 
-/* Handles ultracalls issued by the nested guest */
-static int kvmhv_nested_do_ucall(struct kvm_vcpu *vcpu, unsigned long opcode)
-{
-	unsigned long ret = U_FUNCTION;
-
-	switch (opcode) {
-	case UV_ESM:
-		vcpu->arch.ucall_in_progress = UV_ESM;
-
-		ret = kvmppc_ucall_do_work(vcpu, &vcpu->arch.uv_esm_worker, kvmppc_uv_esm_work_fn);
-		if (ret == U_TOO_HARD)
-			return RESUME_HOST;
-
-		if (ret == U_NO_MEM)
-			return U_RETRY;
-
-		vcpu->arch.ucall_in_progress = 0;
-		break;
-	default:
-		return RESUME_HOST;
-	}
-	kvmppc_set_gpr(vcpu, 3, ret);
-	return RESUME_GUEST;
-}
-
 long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 {
 	long int err, r;
@@ -323,12 +298,8 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 		if (!opcode) {
 			r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
 
-			if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL)
-				opcode = kvmppc_get_gpr(vcpu, 3);
-		}
+		r = kvmppc_uv_handle_exit(vcpu, r);
 
-		if (opcode)
-			r = kvmhv_nested_do_ucall(vcpu, opcode);
 	} while (is_kvmppc_resume_guest(r));
 
 	/* save L2 state for return */
@@ -610,15 +581,13 @@ struct kvm_nested_guest *kvmhv_alloc_nested(struct kvm *kvm, unsigned int lpid)
 	gp->l1_host = kvm;
 	gp->l1_lpid = lpid;
 	mutex_init(&gp->tlb_lock);
-	mutex_init(&gp->slots_lock);
 	gp->shadow_pgtable = pgd_alloc(kvm->mm);
 	if (!gp->shadow_pgtable)
 		goto out_free;
 	shadow_lpid = kvmppc_alloc_lpid();
 	if (shadow_lpid < 0)
 		goto out_free2;
-	gp->memslots = kvmppc_alloc_nested_slots();
-	if (!gp->memslots)
+	if(kvmppc_init_nested_slots(gp))
 		goto out_free3;
 	gp->shadow_lpid = shadow_lpid;
 	gp->radix = 1;
