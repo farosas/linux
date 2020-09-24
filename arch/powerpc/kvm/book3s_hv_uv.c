@@ -11,6 +11,8 @@
 #include <linux/bsearch.h>
 #include <asm/kvm_ppc.h>
 
+/* Used to indicate that a guest page fault needs to be handled */
+#define RESUME_PAGE_FAULT	(RESUME_GUEST | RESUME_FLAG_ARCH1)
 
 static bool uv_gfn_rmap_valid(unsigned long rmap)
 {
@@ -980,6 +982,48 @@ out:
 	return ret;
 }
 
+int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned long n_gpa)
+{
+	gfn_t n_gfn;
+	struct kvm_memory_slot *n_memslot;
+	enum uv_gpf_state gpf_state;
+
+	if (gp->svm_state != SVM_SECURE)
+		return 0;
+
+	printk(KERN_DEBUG "fault for ea=%#lx n_gpa=%#lx\n", ea, n_gpa);
+
+	n_gfn = n_gpa >> PAGE_SHIFT;
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID)) {
+		printk(KERN_DEBUG "no slot for n_gfn=%#llx should emulate mmio\n", n_gfn);
+		return 0;
+	}
+
+	gpf_state = uv_gfn_state(n_memslot->arch.rmap[n_gfn]);
+	printk(KERN_DEBUG "n_gfn=%#llx state=%d\n", n_gfn, gpf_state);
+	if (gpf_state == GPF_PAGEDOUT) {
+		printk(KERN_DEBUG "fault in paged out page, should call page in\n");
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
+static long int kvmppc_uv_handle_fault(struct kvm_vcpu *vcpu)
+{
+	unsigned long ret;
+
+	ret = kvmppc_ucall_do_work(vcpu, kvmppc_uv_fault_work_fn, 0);
+
+	if (ret == U_TOO_HARD)
+		return RESUME_HOST;
+
+	printk(KERN_DEBUG "return from page fault ret=%#lx\n", ret);
+	return RESUME_GUEST;
+}
+
 static long int kvmppc_do_ucall(struct kvm_vcpu *vcpu, unsigned long opcode)
 {
 	unsigned long ret = U_FUNCTION;
@@ -1013,6 +1057,10 @@ long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 			opcode = kvmppc_get_gpr(vcpu, 3);
 
 		return kvmppc_do_ucall(vcpu, opcode);
+	}
+
+	if (worker || r == RESUME_PAGE_FAULT) {
+		return kvmppc_uv_handle_fault(vcpu);
 	}
 
 	return r;
