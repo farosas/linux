@@ -16,6 +16,22 @@ struct kvm_nested_memslots;
 #define L2_PAGE_SHIFT 16
 #define L2_PAGE_SIZE (1ULL << L2_PAGE_SHIFT)
 
+typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
+
+struct uv_worker {
+	struct task_struct *thread;
+	kvm_vm_thread_fn_t thread_fn;
+
+	struct completion work_step_done;
+	struct completion hcall_done;
+
+	struct kvm_vcpu *vcpu;
+
+	unsigned long opcode;
+	bool in_progress;
+	unsigned long ret;
+};
+
 enum svm_state {
 	SVM_SECURE = 1,
 	SVM_ABORT,
@@ -74,6 +90,7 @@ unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid, gpa_t n_gpa,
 				   unsigned long order);
 #else
+struct uv_worker;
 
 static inline long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {

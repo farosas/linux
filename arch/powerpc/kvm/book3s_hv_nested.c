@@ -229,7 +229,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	s64 delta_purr, delta_spurr, delta_ic, delta_vtb;
 	u64 mask;
 	unsigned long lpcr;
-	unsigned long opcode;
+	bool uv_wip;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
 		return H_NOT_AVAILABLE;
@@ -287,6 +287,15 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 
 	vcpu->arch.ret = RESUME_GUEST;
 	vcpu->arch.trap = 0;
+
+	/*
+	 * L0 issues hcalls to L1 via H_ENTER_NESTED return path and
+	 * receives the results back during H_ENTER_NESTED entry
+	 * (here), so we might need to skip entering the guest to
+	 * handle the hcall result.
+	 */
+	uv_wip = vcpu->arch.uv_worker;
+
 	do {
 		if (mftb() >= hdec_exp) {
 			vcpu->arch.trap = BOOK3S_INTERRUPT_HV_DECREMENTER;
@@ -294,8 +303,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 			break;
 		}
 
-		opcode = vcpu->arch.ucall_in_progress;
-		if (!opcode) {
+		if (!uv_wip)
 			r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
 
 		r = kvmppc_uv_handle_exit(vcpu, r);

@@ -7,6 +7,7 @@
  */
 
 #include <linux/kvm_host.h>
+#include <linux/kthread.h>
 #include <linux/bsearch.h>
 #include <asm/kvm_ppc.h>
 
@@ -26,6 +27,107 @@ static enum uv_gpf_state uv_gfn_state(unsigned long rmap)
 static void uv_gfn_set_state(unsigned long *rmap, enum uv_gpf_state state)
 {
 	*rmap = KVMPPC_RMAP_UV_GFN | (*rmap & ~KVMPPC_RMAP_UV_GPF_STATE_MASK) | state;
+}
+
+static struct uv_worker *kvmppc_uv_worker_init(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t fn, unsigned long opcode)
+{
+	struct uv_worker *worker;
+	int r = 0;
+
+	worker = kzalloc(sizeof(struct uv_worker), GFP_KERNEL);
+	if (!worker)
+		return NULL;
+
+	init_completion(&worker->work_step_done);
+	init_completion(&worker->hcall_done);
+
+	worker->thread_fn = fn;
+
+	/* These are for the worker function to consume. We could
+	 * convert to a single pointer to include arbitrary data in
+	 * the future */
+	worker->vcpu = vcpu;
+	worker->opcode = opcode;
+
+	r = kvm_vm_create_worker_thread(vcpu->kvm, worker->thread_fn, (uintptr_t)worker, "kvm_uv_worker",
+					&worker->thread);
+	if (r) {
+		kfree(worker);
+		return NULL;
+	}
+
+	return worker;
+}
+
+static void kvmppc_uv_worker_wait(struct uv_worker *worker)
+{
+	int r;
+
+	worker->ret = U_TOO_HARD;
+	complete(&worker->work_step_done);
+	r = wait_for_completion_killable(&worker->hcall_done);
+	if (r == -ERESTARTSYS) {
+		printk(KERN_DEBUG "worker killed\n");
+	}
+
+	reinit_completion(&worker->hcall_done);
+}
+
+static void __noreturn kvmppc_uv_worker_exit(struct uv_worker *worker, unsigned long ret)
+{
+	worker->ret = ret;
+	worker->in_progress = false;
+	complete_and_exit(&worker->work_step_done, 0);
+}
+
+static void __kvmppc_uv_worker_step(struct kvm_vcpu *vcpu, struct uv_worker *worker)
+{
+	int r;
+
+	if (!worker->in_progress) {
+		worker->in_progress = true;
+		kthread_unpark(worker->thread);
+	} else {
+		reinit_completion(&worker->work_step_done);
+		complete(&worker->hcall_done);
+	}
+
+	r = wait_for_completion_killable(&worker->work_step_done);
+	if (r == -ERESTARTSYS) {
+		printk(KERN_DEBUG "main thread killed\n");
+		worker->ret = -EINTR;
+		worker->in_progress = false;
+	}
+}
+
+/*
+ * This function is called to make progress with an ultracall in L0
+ * that needs assistance from the nested hypervisor. The ucall handler
+ * runs in a separate thread and does so in steps separated by
+ * hypercall requests. Returns U_TOO_HARD while there is still work to
+ * be done.
+ */
+unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t work_fn, unsigned long opcode)
+{
+	struct uv_worker *worker = vcpu->arch.uv_worker;
+        unsigned long ret;
+
+        if (!worker) {
+                worker = kvmppc_uv_worker_init(vcpu, work_fn, opcode);
+                if (!worker)
+                        return U_NO_MEM;
+                vcpu->arch.uv_worker = worker;
+        }
+
+        __kvmppc_uv_worker_step(vcpu, worker);
+	ret = worker->ret;
+
+        if (!worker->in_progress) {
+                kfree(worker);
+                vcpu->arch.uv_worker = NULL;
+        }
+
+        return ret;
 }
 
 static bool uv_gfn_paged_in(unsigned long rmap_entry)
@@ -57,6 +159,266 @@ static struct kvm_memory_slot *gfn_to_nested_memslot(struct kvm_nested_memslots 
 	return bsearch(&gfn, slots->memslots, ARRAY_SIZE(slots->memslots),
 		       sizeof(struct kvm_memory_slot), nested_memslots_cmp);
 }
+
+unsigned long kvmppc_page_in_hcall(struct kvm_vcpu *vcpu, gpa_t gpa, int type)
+{
+	return do_l1_hcall(vcpu, H_SVM_PAGE_IN, 3, gpa, type, L2_PAGE_SHIFT);
+}
+
+static int kvmppc_page_in_from_hv(struct kvm_vcpu *vcpu, unsigned long *rmap, gfn_t start_gfn, unsigned long npages)
+{
+	unsigned long ret;
+	gfn_t gfn;
+	int r = 0;
+
+	if (!npages)
+		return -EINVAL;
+
+	for (gfn = start_gfn; gfn < start_gfn + npages; gfn++) {
+
+		if (uv_gfn_paged_in(rmap[gfn]) ||
+		    uv_gfn_state(rmap[gfn]) != GPF_SECURE)
+			continue;
+		ret = kvmppc_page_in_hcall(vcpu, gfn_to_gpa(gfn), H_PAGE_IN_NONSHARED);
+		if (ret != H_SUCCESS) {
+			printk(KERN_DEBUG "%s failed ret=%#lx", __func__, ret);
+			r = -1;
+			break;
+		}
+
+		uv_gfn_set_paged_in(&rmap[gfn]);
+	}
+
+	return r;
+}
+
+static int kvmppc_page_in_from_hv_all(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp)
+{
+	struct kvm_memory_slot *memslot;
+	int r;
+
+	if (!gp)
+		return -EINVAL;
+
+	if (gp->svm_state == SVM_SECURE)
+		return -EPERM;
+
+	mutex_lock(&gp->slots_lock);
+	kvm_for_each_memslot(memslot, gp->memslots) {
+		r = kvmppc_page_in_from_hv(vcpu,
+					   memslot->arch.rmap,
+					   memslot->base_gfn,
+					   memslot->npages);
+		if (r)
+			goto out;
+	}
+out:
+	mutex_unlock(&gp->slots_lock);
+	printk(KERN_DEBUG "%s ret=%d", __func__, r);
+	return r;
+}
+
+static kvm_pfn_t uv_ngfn_to_pfn(struct kvm_vcpu *vcpu, gfn_t n_gfn)
+{
+	struct kvm *kvm = vcpu->kvm;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	struct kvm_memory_slot *n_memslot;
+	unsigned long rmap, ret;
+	pte_t *ptep, pte;
+
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID))
+		return KVM_PFN_NOSLOT;
+
+	rmap = n_memslot->arch.rmap[n_gfn];
+
+	if (!uv_gfn_paged_in(rmap)) {
+		ret = kvmppc_page_in_hcall(vcpu, n_gfn << L2_PAGE_SHIFT, H_PAGE_IN_NONSHARED);
+		if (ret != H_SUCCESS)
+			return KVM_PFN_ERR_FAULT;
+	}
+
+	pte = __pte(0);
+	spin_lock(&kvm->mmu_lock);
+	ptep = __find_linux_pte(gp->shadow_pgtable, n_gfn << L2_PAGE_SHIFT, NULL, NULL);
+	if (ptep)
+		pte = *ptep;
+	spin_unlock(&kvm->mmu_lock);
+
+	if (pte_present(pte))
+		return pte_pfn(pte);
+
+	return KVM_PFN_ERR_FAULT;
+}
+
+static int kvmppc_uv_copy_tofrom_nested(struct kvm_vcpu *vcpu, gfn_t n_gfn, void *buf, size_t size, bool from)
+{
+	kvm_pfn_t pfn;
+	void *src, *dst, *hva;
+	unsigned long chunk;
+
+	while (size) {
+		pfn = uv_ngfn_to_pfn(vcpu, n_gfn);
+		if (is_error_pfn(pfn))
+			return -EINVAL;
+		hva = __va(pfn_to_hpa(pfn));
+
+		if (from) {
+			src = hva;
+			dst = buf;
+		} else {
+			src = buf;
+			dst = hva;
+		}
+
+		chunk = min(size, (size_t)L2_PAGE_SIZE);
+
+		memcpy(dst, src, chunk);
+
+		n_gfn++;
+		buf += chunk;
+		size -= chunk;
+	};
+
+	return 0;
+}
+
+static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp, gpa_t dt_hdr)
+{
+	kvm_pfn_t pfn;
+	gfn_t n_gfn;
+	gpa_t n_gpa;
+	hpa_t hpa;
+	int r;
+
+	void *buf;
+	size_t size;
+
+	if (!gp)
+		return -EINVAL;
+
+	printk(KERN_DEBUG "%s device-tree header ngpa=%#llx\n", __func__, dt_hdr);
+
+	n_gfn = dt_hdr >> L2_PAGE_SHIFT;
+
+	pfn = uv_ngfn_to_pfn(vcpu, n_gfn);
+	if (is_error_pfn(pfn))
+		return -EINVAL;
+	hpa = pfn_to_hpa(pfn);
+
+	/*
+	 * Copy the device-tree out of the L2 guest memory so that we
+	 * have it in contiguous pages in L0.
+	 */
+
+	size = fdt_totalsize(__va(hpa));
+	buf = kzalloc(size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	r = kvmppc_uv_copy_tofrom_nested(vcpu, n_gfn, buf, size, true);
+	if (r)
+		goto out_free;
+
+	r = uv_fdt_reserve_mem(buf, 4, L2_PAGE_SIZE, &n_gpa);
+	if (r)
+		goto out_free;
+
+	printk(KERN_DEBUG "%s reserved ngpa=%#llx\n", __func__, n_gpa);
+
+	size = fdt_totalsize(buf);
+	r = kvmppc_uv_copy_tofrom_nested(vcpu, n_gfn, buf, size, false);
+
+out_free:
+	kfree(buf);
+	return r;
+}
+
+/*
+ * Handle the UV_ESM ucall.
+ * r4 = secure guest's kernel base address
+ * r5 = secure guest's firmware device tree address
+ */
+int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	unsigned long kbase = kvmppc_get_gpr(vcpu, 4);
+	unsigned long fdt = kvmppc_get_gpr(vcpu, 5);
+	int r;
+	// not documented
+	unsigned long ret = U_FUNCTION;
+
+	if (!kbase) {
+		// not documented
+		ret = U_PARAMETER;
+		goto out;
+	}
+
+	if (!fdt) {
+		ret = U_P2;
+		goto out;
+	}
+
+	if (kvmppc_get_srr1(vcpu) & (MSR_HV|MSR_PR)) {
+		ret = U_PERMISSION;
+		goto out;
+	}
+
+	ret = do_l1_hcall(vcpu, H_SVM_INIT_START, 0);
+	if (ret != H_SUCCESS)
+		goto abort;
+
+	vcpu->arch.nested->fdt_addr = fdt;
+
+	r = kvmppc_page_in_from_hv_all(vcpu, vcpu->arch.nested);
+	if (r) {
+		printk(KERN_DEBUG "%s: page in all failed (%d)\n", __func__, r);
+		goto abort;
+	}
+
+	r = kvmppc_uv_reserve_rtas_buffer(vcpu, vcpu->arch.nested, fdt);
+	if (r) {
+		printk(KERN_DEBUG "%s: rtas buffer reservation failed (%d)\n", __func__, r);
+		goto abort;
+	}
+
+	ret = do_l1_hcall(vcpu, H_SVM_INIT_DONE, 0);
+	if (ret != H_SUCCESS)
+		goto abort;
+
+	vcpu->arch.nested->svm_state = SVM_SECURE;
+	ret = U_SUCCESS;
+out:
+	kvmppc_uv_worker_exit(worker, ret);
+abort:
+	vcpu->arch.nested->svm_state = SVM_ABORT;
+
+	/* H_SVM_INIT_ABORT returns H_PARAMETER on completion. */
+	ret = do_l1_hcall(vcpu, H_SVM_INIT_ABORT, 0);
+	if (ret != H_PARAMETER)
+		pr_err_ratelimited("KVM-UV: vm abortion did not complete\n");
+	kvmppc_uv_worker_exit(worker, H_PARAMETER);
+}
+
+int kvmppc_uv_fault_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	unsigned long n_gpa, ret;
+	int r = 0;
+
+	n_gpa = vcpu->arch.fault_gpa & ~0xF000000000000FFFULL;
+
+	ret = kvmppc_page_in_hcall(vcpu, n_gpa, H_PAGE_IN_NONSHARED);
+	if (ret != H_SUCCESS) {
+		printk(KERN_DEBUG "%s failed ret=%#lx", __func__, ret);
+		r = -1;
+	}
+
+	kvmppc_uv_worker_exit(worker, r);
+}
+
 
 int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
 {
@@ -620,26 +982,36 @@ out:
 
 static long int kvmppc_do_ucall(struct kvm_vcpu *vcpu, unsigned long opcode)
 {
-       unsigned long ret = U_FUNCTION;
-       unsigned long opcode = kvmppc_get_gpr(vcpu, 3);
+	unsigned long ret = U_FUNCTION;
 
-       switch (opcode) {
-       case UV_ESM:
-               ret = kvmppc_uv_esm();
-               break;
-       default:
-               return RESUME_HOST;
-       }
-       kvmppc_set_gpr(vcpu, 3, ret);
-       return RESUME_GUEST;
+	switch (opcode) {
+	case UV_ESM:
+		ret = kvmppc_ucall_do_work(vcpu, kvmppc_uv_esm_work_fn, UV_ESM);
+
+		if (ret == U_TOO_HARD)
+			return RESUME_HOST;
+
+		if (ret == U_NO_MEM)
+			return U_RETRY;
+		break;
+	default:
+		return RESUME_HOST;
+	}
+	kvmppc_set_gpr(vcpu, 3, ret);
+	return RESUME_GUEST;
 }
 
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
+	struct uv_worker *worker = vcpu->arch.uv_worker;
 	unsigned long opcode;
 
 	if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL) {
-		opcode = kvmppc_get_gpr(vcpu, 3);
+		if (worker && worker->opcode)
+			opcode = worker->opcode;
+		else
+			opcode = kvmppc_get_gpr(vcpu, 3);
+
 		return kvmppc_do_ucall(vcpu, opcode);
 	}
 
