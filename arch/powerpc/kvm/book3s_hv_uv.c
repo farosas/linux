@@ -741,6 +741,20 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 	n_gfn = n_gpa >> page_shift;
 	gpf_state = uv_gfn_state(n_memslot->arch.rmap[n_gfn]);
 
+//	if (gp->svm_state != SVM_SECURE)
+//		vcpu_debug(vcpu, "%s gpa=%#llx n_gpa=%#llx state=%d page_shift=%#lx", __func__, gpa, n_gpa, gpf_state, page_shift);
+
+	if (n_gpa == 0x1550000)
+		vcpu_debug(vcpu, "\n\n %s paca page gpa=%#llx n_gpa=%#llx\n\n", __func__, gpa, n_gpa);
+
+	if (n_gpa == 0x2fff0000)
+		vcpu_debug(vcpu, "\n\n %s rtas code page gpa=%#llx n_gpa=%#llx\n\n", __func__, gpa, n_gpa);
+
+	if (n_gpa == gp->fdt_addr) {
+		gp->l1_fdt_addr = gpa;
+		vcpu_debug(vcpu, "\n\n %s fdt page gpa=%#llx n_gpa=%#llx\n\n", __func__, gpa, n_gpa);
+	}
+
 	/* Look for gra -> hra translation in our partition scoped tables for l1 */
 
 	pte = __pte(0);
@@ -755,8 +769,11 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 			vcpu_debug(vcpu, "no pte for l1 gpa=%#llx\n", gpa);
 		r = kvmppc_book3s_instantiate_page(vcpu, gpa, memslot, true,
 						   false, &pte, NULL);
-		if (r)
+		if (r) {
+			if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+				vcpu_debug(vcpu, "failed to create pte for l1 gpa=%#llx\n", gpa);
 			return U_P2;
+		}
 	}
 
 	/* Unmap gra -> hra so that l1 cannot directly access l2's memory */
@@ -771,30 +788,50 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 	spin_lock(&kvm->mmu_lock);
 	ptep = find_kvm_nested_guest_pte(kvm, gp->l1_lpid, n_gpa, NULL);
 	spin_unlock(&kvm->mmu_lock);
-	if (ptep && pte_present(*ptep))
-		return U_SUCCESS;
+	if (ptep) {
+		if (pte_present(*ptep)) {
+			if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+				vcpu_debug(vcpu, "pte already in shadow pgtable n_gpa=%#llx pteval=%#lx\n", n_gpa, pte_val(*ptep));
+			return U_SUCCESS;
+		}
+		if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+			vcpu_debug(vcpu, "pte not present in shadow pgtable n_gpa=%#llx pteval=%#lx\n", n_gpa, pte_val(*ptep));
+	}
 
 	/* Insert new n_gra -> hra pte in the shadow page table for l2 */
 
 	mmu_seq = kvm->mmu_notifier_seq;
 	smp_rmb();
 
+	if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+		vcpu_debug(vcpu, "pte not in shadow pgtable n_gpa=%#llx\n", n_gpa);
 	n_rmap = kzalloc(sizeof(*n_rmap), GFP_KERNEL);
-	if (!n_rmap)
+	if (!n_rmap) {
+		printk_ratelimited(KERN_DEBUG "n_rmap\n");
 		return U_NO_MEM;
+	}
 	n_rmap->rmap = (n_gpa & RMAP_NESTED_GPA_MASK) |
 		(((unsigned long) gp->l1_lpid) << RMAP_NESTED_LPID_SHIFT);
 	rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
 
 	level = (page_shift == PMD_SHIFT) ? 1 : 0;
+//	n_gpa &= ~((1UL << page_shift) - 1);
 
 	r = kvmppc_create_pte(kvm, gp->shadow_pgtable, pte, n_gpa, level,
 			      mmu_seq, gp->shadow_lpid, rmapp, &n_rmap);
+	if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+		vcpu_debug(vcpu, "inserted pte in shadow pgtable n_gpa=%#llx pteval=%#lx\n", n_gpa, pte_val(pte));
 	kfree(n_rmap);
-	if (r == -EAGAIN)
+	if (r == -EAGAIN) {
+		if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+			printk(KERN_DEBUG "EAGAIN\n");
 		return U_BUSY;
-	if (r || !pte_present(pte))
+	}
+	if (r || !pte_present(pte)) {
+		if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+			printk(KERN_DEBUG "failed to insert pte for n_gpa=%#llx r=%d", n_gpa, r);
 		return U_BUSY;
+	}
 
 /* DEBUG
 	{
@@ -812,6 +849,8 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 */
 
 	uv_gfn_set_state(&n_memslot->arch.rmap[n_gfn], GPF_SECURE);
+	if (gp->svm_state == SVM_SECURE && n_gpa == 0x1400000)
+		printk(KERN_DEBUG "gpa state=%d", uv_gfn_state(n_memslot->arch.rmap[n_gfn]));
 	return U_SUCCESS;
 }
 
@@ -831,6 +870,13 @@ static unsigned long kvmppc_uv_page_out(struct kvm_vcpu *vcpu,
 	gfn = gpa >> PAGE_SHIFT;
 	n_gfn = n_gpa >> page_shift;
 	gpf_state = uv_gfn_state(n_memslot->arch.rmap[n_gfn]);
+
+//	vcpu_debug(vcpu, "%s lpid=%d gpa=%#llx n_gpa=%#llx state=%d page_shift=%#lx", __func__, gp->l1_lpid, gpa, n_gpa, gpf_state, page_shift);
+//	if (page_shift)
+//		return U_SUCCESS;
+
+	if (n_gpa == 0x1b80000)
+		vcpu_debug(vcpu, "\n\n %s fdt page=%#llx\n\n", __func__, gpa);
 
 	if (gpf_state == GPF_HV_UNSHARED) {
 		vcpu_debug(vcpu, "gfn=%#llx unshared\n", n_gfn);
@@ -856,11 +902,16 @@ static unsigned long kvmppc_uv_page_out(struct kvm_vcpu *vcpu,
 	spin_unlock(&kvm->mmu_lock);
 
 	if (!pte_present(pte)) {
+//		vcpu_debug(vcpu, "no pte for l1 gpa=%#llx\n", gpa);
 		r = kvmppc_book3s_instantiate_page(vcpu, gpa, memslot, true,
 						   false, &pte, NULL);
+//		vcpu_debug(vcpu, "pteval=%#lx rpn=%#lx\n", pte_val(pte), pte_val(pte) & PTE_RPN_MASK);
 		if (r) {
+//			vcpu_debug(vcpu, "failed to create pte for l1 gpa=%#llx\n", gpa);
 			return U_P2;
 		}
+	} else {
+//		vcpu_debug(vcpu, "pte already in l1 pgtable gpa=%#llx pteval=%#lx rpn=%#lx\n", gpa, pte_val(pte), pte_val(pte) & PTE_RPN_MASK);
 	}
 
 /* DEBUG
@@ -966,6 +1017,8 @@ unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid,
 
 	gpf_state = uv_gfn_state(n_memslot->arch.rmap[n_gfn]);
 
+//	vcpu_debug(vcpu, "%s lpid=%d n_gpa=%#llx state=%#x page_shift=%#lx", __func__, lpid, n_gpa, (int)gpf_state, order);
+
 	switch (uv_gpf_state_generic(gpf_state)) {
 	case GPF_SHARED:
 		kvmhv_invalidate_shadow_pte(vcpu, gp, n_gpa, NULL);
@@ -1039,6 +1092,42 @@ static long int kvmppc_do_ucall(struct kvm_vcpu *vcpu, unsigned long opcode)
 
 		if (ret == U_NO_MEM)
 			return U_RETRY;
+		break;
+	case UV_WRITE_PATE:
+		vcpu_debug(vcpu, "L2 UV_WRITE_PATE\n");
+		break;
+	case UV_SHARE_PAGE:
+		vcpu_debug(vcpu, "L2 UV_SHARE_PAGE\n");
+		break;
+	case UV_UNSHARE_PAGE:
+		vcpu_debug(vcpu, "L2 UV_UNSHARE_PAGE\n");
+		break;
+	case UV_RETURN:
+		vcpu_debug(vcpu, "L2 UV_RETURN\n");
+		break;
+	case UV_RESTRICTED_SPR_WRITE:
+		vcpu_debug(vcpu, "L2 UV_RESTRICTED_SPR_WRITE\n");
+		break;
+	case UV_RESTRICTED_SPR_READ:
+		vcpu_debug(vcpu, "L2 UV_RESTRICTED_SPR_READ\n");
+		break;
+	case UV_READ_SCOM:
+		vcpu_debug(vcpu, "L2 UV_READ_SCOM\n");
+		break;
+	case UV_WRITE_SCOM:
+		vcpu_debug(vcpu, "L2 UV_WRITE_SCOM\n");
+		break;
+	case UV_SVM_TERMINATE:
+		vcpu_debug(vcpu, "L2 SVM_TERMINATE\n");
+		break;
+	case UV_READ_MEM:
+		vcpu_debug(vcpu, "L2 UV_READ_MEM\n");
+		break;
+	case UV_WRITE_MEM:
+		vcpu_debug(vcpu, "L2 UV_WRITE_MEM\n");
+		break;
+	case UV_SEND_SBE_COMMAND:
+		vcpu_debug(vcpu, "L2 UV_SEND_SBE_COMMAND\n");
 		break;
 	default:
 		return RESUME_HOST;

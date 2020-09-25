@@ -239,6 +239,11 @@ void mmu_partition_table_set_entry(unsigned int lpid, unsigned long dw0,
 	partition_tb[lpid].patb0 = cpu_to_be64(dw0);
 	partition_tb[lpid].patb1 = cpu_to_be64(dw1);
 
+	printk(KERN_DEBUG "%s partition table entry for lpid=%d dw0=%#llx dw1=%#llx\n", __func__,
+	       lpid,
+	       partition_tb[lpid].patb0,
+	       partition_tb[lpid].patb1);
+
 	/*
 	 * If ultravisor is enabled, we do an ultravisor call to register the
 	 * partition table entry (PATE), which also do a global flush of TLBs
@@ -256,6 +261,7 @@ void mmu_partition_table_set_entry(unsigned int lpid, unsigned long dw0,
 		 * CPU does a tlbiel_all() before switching them on, which
 		 * flushes everything.
 		 */
+		printk(KERN_DEBUG "%s flush partition\n", __func__);
 		flush_partition(lpid, (old & PATB_HR));
 	}
 }

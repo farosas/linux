@@ -31,7 +31,7 @@ static inline void __iomem *get_tima_phys(void)
 {
 	return local_paca->kvm_hstate.xive_tima_phys;
 }
-
+#undef DEBUG
 #undef XIVE_RUNTIME_CHECKS
 #define X_PFX xive_rm_
 #define X_STATIC

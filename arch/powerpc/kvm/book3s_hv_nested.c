@@ -261,6 +261,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 		return H_PARAMETER;
 	if (!l2->l1_gr_to_hr) {
 		mutex_lock(&l2->tlb_lock);
+		printk(KERN_DEBUG "no l1 partition table entry for l2 at guest entry\n");
 		kvmhv_update_ptbl_cache(l2);
 		mutex_unlock(&l2->tlb_lock);
 	}
@@ -563,17 +564,22 @@ static void kvmhv_update_ptbl_cache(struct kvm_nested_guest *gp)
 	unsigned long ptbl_addr;
 	struct kvm *kvm = gp->l1_host;
 
+	printk(KERN_DEBUG "%s\n", __func__);
 	ret = -EFAULT;
 	ptbl_addr = (kvm->arch.l1_ptcr & PRTB_MASK) + (gp->l1_lpid << 4);
 	if (gp->l1_lpid < (1ul << ((kvm->arch.l1_ptcr & PRTS_MASK) + 8)))
 		ret = kvm_read_guest(kvm, ptbl_addr,
 				     &ptbl_entry, sizeof(ptbl_entry));
 	if (ret) {
+		printk(KERN_DEBUG "%s failed to read l1 guest memory\n", __func__);
 		gp->l1_gr_to_hr = 0;
 		gp->process_table = 0;
 	} else {
 		gp->l1_gr_to_hr = be64_to_cpu(ptbl_entry.patb0);
 		gp->process_table = be64_to_cpu(ptbl_entry.patb1);
+		printk(KERN_DEBUG "%s partition scoped table=%#llx process table=%#llx\n", __func__,
+		       gp->l1_gr_to_hr,
+		       gp->process_table);
 	}
 	kvmhv_set_nested_ptbl(gp);
 }
@@ -966,6 +972,8 @@ bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
 
 	if (shift_ret)
 		*shift_ret = shift;
+//	if (ret)
+//		printk(KERN_DEBUG "invalidated pte gpa=%#lx\n", gpa);
 	return ret;
 }
 
@@ -1063,6 +1071,7 @@ static void kvmhv_emulate_tlbie_lpid(struct kvm_vcpu *vcpu,
 		break;
 	case 2:
 		/* Invalidate TLB, PWC and caching of partition table entries */
+//		dump_stack();
 		kvmhv_flush_nested(gp);
 		break;
 	default:
@@ -1176,38 +1185,47 @@ static int kvmhv_translate_addr_nested(struct kvm_vcpu *vcpu,
 					 &fault_addr);
 
 	if (ret) {
-		/* We didn't find a pte */
+//		if (gp->svm_state == SVM_SECURE)
+//			printk(KERN_DEBUG "/* We didn't find a pte */\n");
 		if (ret == -EINVAL) {
-			/* Unsupported mmu config */
+//			if (gp->svm_state == SVM_SECURE)
+//				printk(KERN_DEBUG "/* Unsupported mmu config */\n");
 			flags |= DSISR_UNSUPP_MMU;
 		} else if (ret == -ENOENT) {
-			/* No translation found */
+//			if (gp->svm_state == SVM_SECURE)
+//				printk(KERN_DEBUG "/* No translation found */\n");
 			flags |= DSISR_NOHPTE;
 		} else if (ret == -EFAULT) {
-			/* Couldn't access L1 real address */
+//			if (gp->svm_state == SVM_SECURE)
+//				printk(KERN_DEBUG "/* Couldn't access L1 real address */\n");
 			flags |= DSISR_PRTABLE_FAULT;
 			vcpu->arch.fault_gpa = fault_addr;
 		} else {
-			/* Unknown error */
+//			if (gp->svm_state == SVM_SECURE)
+//				printk(KERN_DEBUG "/* Unknown error */\n");
 			return ret;
 		}
 		goto forward_to_l1;
 	} else {
-		/* We found a pte -> check permissions */
+//		if (gp->svm_state == SVM_SECURE)
+//			printk(KERN_DEBUG "/* We found a pte -> check permissions */\n");
 		if (dsisr & DSISR_ISSTORE) {
-			/* Can we write? */
+//			if (gp->svm_state == SVM_SECURE)
+//				printk(KERN_DEBUG "/* Can we write? */\n");
 			if (!gpte_p->may_write) {
 				flags |= DSISR_PROTFAULT;
 				goto forward_to_l1;
 			}
 		} else if (vcpu->arch.trap == BOOK3S_INTERRUPT_H_INST_STORAGE) {
-			/* Can we execute? */
+//			if (gp->svm_state == SVM_SECURE)
+//				printk(KERN_DEBUG "/* Can we execute? */\n");
 			if (!gpte_p->may_execute) {
 				flags |= SRR1_ISI_N_G_OR_CIP;
 				goto forward_to_l1;
 			}
 		} else {
-			/* Can we read? */
+//			if (gp->svm_state == SVM_SECURE)
+//				printk(KERN_DEBUG "/* Can we read? */\n");
 			if (!gpte_p->may_read && !gpte_p->may_write) {
 				flags |= DSISR_PROTFAULT;
 				goto forward_to_l1;
@@ -1218,6 +1236,10 @@ static int kvmhv_translate_addr_nested(struct kvm_vcpu *vcpu,
 	return 0;
 
 forward_to_l1:
+#ifdef CONFIG_PPC_UV_EMULATE
+	if (gp->svm_state == SVM_SECURE)
+		printk(KERN_DEBUG "forward to l1\n");
+#endif
 	vcpu->arch.fault_dsisr = flags;
 	if (vcpu->arch.trap == BOOK3S_INTERRUPT_H_INST_STORAGE) {
 		vcpu->arch.shregs.msr &= SRR1_MSR_BITS;
@@ -1310,9 +1332,12 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 	long int ret;
 
 	if (!gp->l1_gr_to_hr) {
+		printk(KERN_DEBUG "no l1 partition table entry for l2\n");
 		kvmhv_update_ptbl_cache(gp);
-		if (!gp->l1_gr_to_hr)
+		if (!gp->l1_gr_to_hr) {
+			printk(KERN_DEBUG "no translation\n");
 			return RESUME_HOST;
+		}
 	}
 
 	/* Convert the nested guest real address into a L1 guest real address */
@@ -1326,7 +1351,8 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 	if (!(dsisr & DSISR_PRTABLE_FAULT))
 		n_gpa |= ea & 0xFFF;
 	ret = kvmhv_translate_addr_nested(vcpu, gp, n_gpa, dsisr, &gpte);
-
+//	if (gp->svm_state == SVM_SECURE)
+//		printk(KERN_DEBUG "ret=%ld n_gpa=%#lx\n", ret, n_gpa);
 	/*
 	 * If the hardware found a translation but we don't now have a usable
 	 * translation in the l1 partition-scoped tree, remove the shadow pte
@@ -1336,8 +1362,10 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 	    (dsisr & (DSISR_PROTFAULT | DSISR_BADACCESS | DSISR_NOEXEC_OR_G |
 		      DSISR_BAD_COPYPASTE)))
 		goto inval;
-	if (ret)
+	if (ret) {
+//		printk_ratelimited(KERN_DEBUG "return ret=%ld n_gpa=%#lx\n", ret, n_gpa);
 		return ret;
+	}
 
 	/* Failed to set the reference/change bits */
 	if (dsisr & DSISR_SET_RC) {
@@ -1348,8 +1376,10 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 			goto inval;
 		dsisr &= ~DSISR_SET_RC;
 		if (!(dsisr & (DSISR_BAD_FAULT_64S | DSISR_NOHPTE |
-			       DSISR_PROTFAULT)))
+			       DSISR_PROTFAULT))) {
+//			printk(KERN_DEBUG "bad fault for ea=%#lx n_gpa=%#lx\n", ea, n_gpa);
 			return RESUME_GUEST;
+		}
 	}
 
 	/*
@@ -1375,10 +1405,11 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 		if (dsisr & (DSISR_PRTABLE_FAULT | DSISR_BADACCESS)) {
 			/* unusual error -> reflect to the guest as a DSI */
 			kvmppc_core_queue_data_storage(vcpu, ea, dsisr);
+			printk_ratelimited(KERN_DEBUG "no memslot\n");
 			return RESUME_GUEST;
 		}
 
-		/* passthrough of emulated MMIO case */
+		printk(KERN_DEBUG "/* passthrough of emulated MMIO case */\n");
 		return kvmppc_hv_emulate_mmio(vcpu, gpa, ea, writing);
 	}
 	if (memslot->flags & KVM_MEM_READONLY) {
@@ -1386,6 +1417,7 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 			/* Give the guest a DSI */
 			kvmppc_core_queue_data_storage(vcpu, ea,
 					DSISR_ISSTORE | DSISR_PROTFAULT);
+			printk_ratelimited(KERN_DEBUG "read only\n");
 			return RESUME_GUEST;
 		}
 		kvm_ro = true;
@@ -1411,10 +1443,14 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 		/* No suitable pte found -> try to insert a mapping */
 		ret = kvmppc_book3s_instantiate_page(vcpu, gpa, memslot,
 					writing, kvm_ro, &pte, &level);
-		if (ret == -EAGAIN)
+		if (ret == -EAGAIN) {
+			printk_ratelimited(KERN_DEBUG "EAGAIN\n");
 			return RESUME_GUEST;
-		else if (ret)
+		}
+		else if (ret) {
+//			printk(KERN_DEBUG "return %s\n\n", (ret == RESUME_HOST ? "RESUME_HOST" : "RESUME_GUEST"));
 			return ret;
+		}
 		shift = kvmppc_radix_level_to_shift(level);
 	}
 	/* Align gfn to the start of the page */
@@ -1447,21 +1483,26 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 	/* 4. Insert the pte into our shadow_pgtable */
 
 	n_rmap = kzalloc(sizeof(*n_rmap), GFP_KERNEL);
-	if (!n_rmap)
+	if (!n_rmap) {
+		printk_ratelimited(KERN_DEBUG "n_rmap\n");
 		return RESUME_GUEST; /* Let the guest try again */
+	}
 	n_rmap->rmap = (n_gpa & RMAP_NESTED_GPA_MASK) |
 		(((unsigned long) gp->l1_lpid) << RMAP_NESTED_LPID_SHIFT);
 	rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
 	ret = kvmppc_create_pte(kvm, gp->shadow_pgtable, pte, n_gpa, level,
 				mmu_seq, gp->shadow_lpid, rmapp, &n_rmap);
 	kfree(n_rmap);
-	if (ret == -EAGAIN)
+	if (ret == -EAGAIN) {
+		printk_ratelimited(KERN_DEBUG "EAGAIN 2\n");
 		ret = RESUME_GUEST;	/* Let the guest try again */
-
+	}
+//	printk(KERN_DEBUG "return %s\n\n", (ret == RESUME_HOST ? "RESUME_HOST" : "RESUME_GUEST ok"));
 	return ret;
 
  inval:
 	kvmhv_invalidate_shadow_pte(vcpu, gp, n_gpa, NULL);
+	printk(KERN_DEBUG "inval\n");
 	return RESUME_GUEST;
 }
 
