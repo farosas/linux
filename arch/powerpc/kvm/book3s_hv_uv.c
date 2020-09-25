@@ -9,6 +9,8 @@
 #include <linux/kvm_host.h>
 #include <linux/kthread.h>
 #include <linux/bsearch.h>
+#include <linux/libfdt.h>
+#include <asm/ultravisor.h>
 #include <asm/kvm_ppc.h>
 
 /* Used to indicate that a guest page fault needs to be handled */
