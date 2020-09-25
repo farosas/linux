@@ -134,6 +134,30 @@ unsigned long kvmppc_ucall_do_work(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t wor
         return ret;
 }
 
+static unsigned long do_l1_hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs, ...)
+{
+	int i;
+	va_list args;
+	struct uv_worker *worker;
+
+	worker = vcpu->arch.uv_worker;
+
+	va_start(args, nargs);
+	for (i = 0; i < nargs; ++i)
+		kvmppc_set_gpr(vcpu, 4 + i, va_arg(args, unsigned long));
+	va_end(args);
+
+	/* Set the registers as if L2 was doing the hcall. */
+	kvmppc_set_gpr(vcpu, 3, hcall);
+	kvmppc_set_srr1(vcpu, kvmppc_get_srr1(vcpu) | MSR_S);
+	vcpu->arch.trap = BOOK3S_INTERRUPT_SYSCALL;
+
+	/* wait for L1 */
+	kvmppc_uv_worker_wait(worker);
+
+	return kvmppc_get_gpr(vcpu, 3);
+}
+
 static bool uv_gfn_paged_in(unsigned long rmap_entry)
 {
 	return (uv_gfn_rmap_valid(rmap_entry) && test_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, &rmap_entry));
