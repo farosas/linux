@@ -25,6 +25,9 @@
 
 #define RTAS_BOUNCE_BUFFER_PAGES 4
 
+/* Used to indicate that a guest page fault needs to be handled */
+#define RESUME_PAGE_FAULT	(RESUME_GUEST | RESUME_FLAG_ARCH1)
+
 typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 
 struct uv_worker {
@@ -252,6 +255,23 @@ static int hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs, ...)
 int kvmppc_page_in_hcall(struct kvm_vcpu *vcpu, gpa_t gpa, int type)
 {
 	return hcall(vcpu, H_SVM_PAGE_IN, 3, gpa, type, L2_PAGE_SHIFT);
+}
+
+int kvmppc_uv_fault_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	unsigned long n_gpa;
+	int r;
+
+	printk(KERN_DEBUG "%s\n", __func__);
+
+	n_gpa = vcpu->arch.fault_gpa & ~0xF000000000000FFFULL;
+	r = kvmppc_page_in_hcall(vcpu, n_gpa, H_PAGE_IN_NONSHARED);
+
+	printk(KERN_DEBUG "%s ret:%d\n", __func__, r);
+
+	kvmppc_uv_worker_exit(worker, r);
 }
 
 int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
@@ -989,6 +1009,91 @@ abort:
 	kvmppc_uv_worker_exit(worker, H_PARAMETER);
 }
 
+static void rtas_copy_args(struct rtas_args *dst, struct rtas_args *src)
+{
+	int i, nargs, nret;
+
+	nargs = be32_to_cpu(src->nargs);
+	nret = be32_to_cpu(src->nret);
+
+	dst->token = src->token;
+	dst->nargs = src->nargs;
+	dst->nret  = src->nret;
+	dst->rets = &(dst->args[nargs]);
+
+	for (i = 0; i < nargs; ++i)
+		dst->args[i] = src->args[i];
+
+	for (i = 0; i < nret; ++i)
+		dst->rets[i] = src->rets[i];
+}
+
+/*
+ * The RTAS buffer provided by the nested guest needs to be shared
+ * with its nested hypervisor, but we can only share at the page
+ * granularity, so to avoid leaking data that is in the same page as
+ * the RTAS buffer we need to copy the nested guest-provided buffer
+ * into a different area.
+ */
+int kvmppc_uv_rtas_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	gpa_t arg_buf = kvmppc_get_gpr(vcpu, 4) & KVM_PAM;
+	struct rtas_args *args, *bargs;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	unsigned long ret = -1;
+	int i, nret, nargs;
+
+	if (!gp)
+		goto out;
+
+	/* Read the nested guest RTAS argument buffer */
+	args = (struct rtas_args *)uv_ngpa_to_hva(vcpu, arg_buf);
+	if (!args)
+		goto out;
+	printk(KERN_DEBUG "%s: orig gpa= %#llx token= %#x nargs= %#x, nret= %#x, rets= %#lx\n", __func__,
+	       arg_buf, be32_to_cpu(args->token), be32_to_cpu(args->nargs), be32_to_cpu(args->nret),
+	       (unsigned long)args->rets);
+
+	/* Copy the nested guest RTAS argument buffer into the bounce buffer */
+	bargs = (struct rtas_args *)uv_ngpa_to_hva(vcpu, gp->rtas_buf);
+	if (!bargs) {
+		printk(KERN_DEBUG "bargs= %#lx\n", (unsigned long)bargs);
+		goto out;
+	}
+
+	rtas_copy_args(bargs, args);
+
+	/* Update 'rets' to use the guest physical address of the new buffer */
+	nargs = be32_to_cpu(bargs->nargs);
+	bargs->rets = (void *)(gp->rtas_buf +
+			       offsetof(struct rtas_args, args) +
+			       (nargs * sizeof(rtas_arg_t)));
+
+	printk(KERN_DEBUG "%s: bounce gpa= %#llx token= %#x nargs= %#x, nret= %#x, args= %#lx, rets= %#lx\n", __func__,
+	       gp->rtas_buf, be32_to_cpu(bargs->token), be32_to_cpu(bargs->nargs), be32_to_cpu(bargs->nret),
+	       (unsigned long)bargs->args, (unsigned long)bargs->rets);
+
+	/*
+	 * Proceed with the RTAS call, but replace the original
+	 * argument buffer with the bounce buffer.
+	 */
+	hcall(vcpu, H_RTAS, 1, gp->rtas_buf);
+
+	/* Restore 'rets' to a host virtual address */
+	bargs->rets = &(bargs->args[nargs]);
+
+	/* Copy the results back to the nested guest buffer */
+	nret = be32_to_cpu(args->nret);
+	for (i = 0; i < nret; ++i)
+		args->rets[i] = bargs->rets[i];
+
+	ret = 0;
+out:
+	kvmppc_uv_worker_exit(worker, ret);
+}
+
 /*
  * Handles hypercalls issued by the nested guest when emulating an
  * ultravisor in a system without SMF. This includes what the nested
@@ -1015,13 +1120,72 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 	return RESUME_GUEST;
 }
 
+/*
+ * This is a hook into the nested page fault handling code. We can do
+ * any early operations here, but the nested code should handle most
+ * cases after we return 0.
+ *
+ * A non zero return code from this function will eventually be
+ * handled by kvmppc_uv_handle_exit where we can perform any
+ * additional tasks, particularly the ones requiring L1's assistance.
+ */
+int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned long n_gpa)
+{
+	struct kvm_memory_slot *n_memslot;
+	gfn_t n_gfn;
+	enum uv_gpf_state state;
+
+	if (gp->svm_state != SVM_SECURE)
+		return 0;
+
+	printk(KERN_DEBUG "fault for ea=%#lx n_gpa=%#lx\n", ea, n_gpa);
+
+	n_gfn = n_gpa >> PAGE_SHIFT;
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID)) {
+		printk(KERN_DEBUG "no slot for n_gfn=%#llx should emulate mmio\n", n_gfn);
+		return 0;
+	}
+
+	return -1;
+}
+
+/*
+ * At this point both our early hook in kvmppc_uv_page_fault and the
+ * nested page fault code have already executed and the fault was
+ * still not handled. We will call H_SVM_PAGE_IN to get the page from
+ * L1.
+ */
+static long int kvmppc_uv_page_fault_exit(struct kvm_vcpu *vcpu)
+{
+	unsigned long ret;
+
+	ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_fault_work_fn, 0);
+
+	if (ret == U_TOO_HARD)
+		return RESUME_HOST;
+
+	printk(KERN_DEBUG "return from page fault ret=%#lx\n", ret);
+	return RESUME_GUEST;
+}
+
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
+	struct uv_worker *worker = vcpu->arch.uv_worker;
 	unsigned long opcode;
 
 	if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL) {
-		opcode = kvmppc_get_gpr(vcpu, 3);
+		if (worker && worker->opcode)
+			opcode = worker->opcode;
+		else
+			opcode = kvmppc_get_gpr(vcpu, 3);
+
 		return kvmppc_uv_do_hcall(vcpu, opcode);
+	}
+
+	if (worker || r == RESUME_PAGE_FAULT) {
+		return kvmppc_uv_page_fault_exit(vcpu);
 	}
 
 	return r;
