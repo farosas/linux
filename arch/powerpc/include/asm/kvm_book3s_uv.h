@@ -19,7 +19,11 @@ unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu,
 					 unsigned long flags,
 					 short slot_id);
 unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id);
-
+unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
+				      unsigned int lpid, gpa_t gpa, gpa_t n_gpa,
+				      unsigned long flags, unsigned long order);
+unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid, gpa_t n_gpa,
+				   unsigned long order);
 #else
 
 static inline long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
@@ -48,7 +52,20 @@ static inline unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu,
 
 static inline unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int lpid, short slot_id)
 {
-       return U_FUNCTION;
+	return U_FUNCTION;
+}
+
+static inline unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
+						    unsigned int lpid, gpa_t gpa, gpa_t n_gpa,
+						    unsigned long flags, unsigned long order)
+{
+	return U_FUNCTION;
+}
+
+static inline unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid,
+						 gpa_t n_gpa, unsigned long order)
+{
+	return U_FUNCTION;
 }
 
 #endif /* CONFIG_PPC_UV_EMULATE */

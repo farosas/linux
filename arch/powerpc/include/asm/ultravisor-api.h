@@ -22,6 +22,9 @@
 #define U_PERMISSION		H_PERMISSION
 #define U_SUCCESS		H_SUCCESS
 #define U_UNSUPPORTED		H_UNSUPPORTED
+#define U_STATE		H_STATE
+#define U_NO_MEM		H_NO_MEM
+#define U_RETRY		-5
 
 /* opcodes */
 #define UV_WRITE_PATE			0xF104
