@@ -932,9 +932,9 @@ static void kvmhv_free_memslot_nest_rmap(struct kvm_memory_slot *free)
 	}
 }
 
-static bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
-					struct kvm_nested_guest *gp,
-					long gpa, int *shift_ret)
+bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
+				 struct kvm_nested_guest *gp,
+				 long gpa, int *shift_ret)
 {
 	struct kvm *kvm = vcpu->kvm;
 	bool ret = false;
