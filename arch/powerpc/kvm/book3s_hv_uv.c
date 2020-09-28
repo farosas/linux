@@ -159,6 +159,17 @@ static unsigned long kvmppc_uv_do_work(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t
 	return ret;
 }
 
+static bool uv_gfn_paged_in(unsigned long rmap_entry)
+{
+	return (uv_gfn_rmap_valid(rmap_entry) && test_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, &rmap_entry));
+}
+
+static void uv_gfn_set_paged_in(unsigned long *rmap_entry)
+{
+	*rmap_entry |= KVMPPC_RMAP_UV_GFN;
+	set_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, rmap_entry);
+}
+
 static unsigned long hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs, ...)
 {
 	int i;
@@ -668,6 +679,64 @@ out:
 	return ret;
 }
 
+unsigned long kvmppc_page_in_hcall(struct kvm_vcpu *vcpu, gpa_t gpa, int type)
+{
+	return hcall(vcpu, H_SVM_PAGE_IN, 3, gpa, type, L2_PAGE_SHIFT);
+}
+
+static int kvmppc_page_in_from_hv(struct kvm_vcpu *vcpu, unsigned long *rmap, gfn_t start_gfn, unsigned long npages)
+{
+	unsigned long ret;
+	gfn_t gfn;
+	int r = 0;
+
+	if (!npages)
+		return -EINVAL;
+
+	for (gfn = start_gfn; gfn < start_gfn + npages; gfn++) {
+
+		if (uv_gfn_paged_in(rmap[gfn]) ||
+		    uv_gfn_state(rmap[gfn]) != GPF_SECURE)
+			continue;
+		ret = kvmppc_page_in_hcall(vcpu, gfn_to_gpa(gfn), H_PAGE_IN_NONSHARED);
+		if (ret != H_SUCCESS) {
+			printk(KERN_DEBUG "%s failed ret=%#lx", __func__, ret);
+			r = -1;
+			break;
+		}
+
+		uv_gfn_set_paged_in(&rmap[gfn]);
+	}
+
+	return r;
+}
+
+static int kvmppc_page_in_from_hv_all(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp)
+{
+	struct kvm_memory_slot *memslot;
+	int r;
+
+	if (!gp)
+		return -EINVAL;
+
+	if (gp->svm_state == SVM_SECURE)
+		return -EPERM;
+
+	mutex_lock(&gp->slots_lock);
+	kvm_for_each_memslot(memslot, gp->memslots) {
+		r = kvmppc_page_in_from_hv(vcpu,
+					   memslot->arch.rmap,
+					   memslot->base_gfn,
+					   memslot->npages);
+		if (r)
+			goto out;
+	}
+out:
+	mutex_unlock(&gp->slots_lock);
+	printk(KERN_DEBUG "%s ret=%d", __func__, r);
+	return r;
+}
+
 /*
  * Handle the UV_ESM ucall.
  * r4 = secure guest's kernel base address
@@ -681,6 +750,7 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	unsigned long fdt = kvmppc_get_gpr(vcpu, 5);
 	// not documented
 	unsigned long ret = U_FUNCTION;
+	int r;
 
 	if (!kbase) {
 		// not documented
@@ -701,6 +771,12 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	ret = hcall(vcpu, H_SVM_INIT_START, 0);
 	if (ret != H_SUCCESS)
 		goto abort;
+
+	r = kvmppc_page_in_from_hv_all(vcpu, vcpu->arch.nested);
+	if (r) {
+		printk(KERN_DEBUG "%s: page in all failed (%d)\n", __func__, r);
+		goto abort;
+	}
 
 	ret = hcall(vcpu, H_SVM_INIT_DONE, 0);
 	if (ret != H_SUCCESS)
