@@ -36,11 +36,6 @@ struct uv_worker {
 	unsigned long ret;
 };
 
-enum svm_state {
-	SVM_SECURE = 1,
-	SVM_ABORT,
-};
-
 enum uv_gpf_state {
 	GPF_SECURE,
 	GPF_PAGEDOUT,
@@ -673,14 +668,56 @@ out:
 	return ret;
 }
 
+/*
+ * Handle the UV_ESM ucall.
+ * r4 = secure guest's kernel base address
+ * r5 = secure guest's firmware device tree address
+ */
 int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 {
 	struct uv_worker *worker = (struct uv_worker *)thread_data;
 	struct kvm_vcpu *vcpu = worker->vcpu;
+	unsigned long kbase = kvmppc_get_gpr(vcpu, 4);
+	unsigned long fdt = kvmppc_get_gpr(vcpu, 5);
+	// not documented
+	unsigned long ret = U_FUNCTION;
 
-	/* temporarily to avoid unused function warnings */
-	hcall(vcpu, H_SVM_INIT_ABORT, 0);
-	kvmppc_uv_worker_exit(worker, U_UNSUPPORTED);
+	if (!kbase) {
+		// not documented
+		ret = U_PARAMETER;
+		goto out;
+	}
+
+	if (!fdt) {
+		ret = U_P2;
+		goto out;
+	}
+
+	if (kvmppc_get_srr1(vcpu) & (MSR_HV|MSR_PR)) {
+		ret = U_PERMISSION;
+		goto out;
+	}
+
+	ret = hcall(vcpu, H_SVM_INIT_START, 0);
+	if (ret != H_SUCCESS)
+		goto abort;
+
+	ret = hcall(vcpu, H_SVM_INIT_DONE, 0);
+	if (ret != H_SUCCESS)
+		goto abort;
+
+	vcpu->arch.nested->svm_state = SVM_SECURE;
+	ret = U_SUCCESS;
+out:
+	kvmppc_uv_worker_exit(worker, ret);
+abort:
+	vcpu->arch.nested->svm_state = SVM_ABORT;
+
+	/* H_SVM_INIT_ABORT returns H_PARAMETER on completion. */
+	ret = hcall(vcpu, H_SVM_INIT_ABORT, 0);
+	if (ret != H_PARAMETER)
+		pr_err_ratelimited("KVM-UV: vm abortion did not complete\n");
+	kvmppc_uv_worker_exit(worker, H_PARAMETER);
 }
 
 /*
