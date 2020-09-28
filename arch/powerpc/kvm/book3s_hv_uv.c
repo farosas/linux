@@ -220,6 +220,23 @@ int kvmppc_page_in_hcall(struct kvm_vcpu *vcpu, gpa_t gpa, int type)
 	return hcall(vcpu, H_SVM_PAGE_IN, 3, gpa, type, L2_PAGE_SHIFT);
 }
 
+int kvmppc_uv_fault_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	unsigned long n_gpa;
+	int r;
+
+	printk(KERN_DEBUG "%s\n", __func__);
+
+	n_gpa = vcpu->arch.fault_gpa & ~0xF000000000000FFFULL;
+	r = kvmppc_page_in_hcall(vcpu, n_gpa, H_PAGE_IN_NONSHARED);
+
+	printk(KERN_DEBUG "%s ret:%d\n", __func__, r);
+
+	kvmppc_uv_worker_exit(worker, r);
+}
+
 int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
 {
 	struct kvm_nested_memslots *slots;
@@ -850,6 +867,36 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 }
 
 /*
+ * This is a hook into the nested page fault handling code. We can do
+ * any early operations here, but the nested code should handle most
+ * cases after we return 0.
+ *
+ * A non zero return code from this function will eventually be
+ * handled by kvmppc_uv_handle_exit where we can perform any
+ * additional tasks, particularly the ones requiring L1's assistance.
+ */
+int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned long n_gpa)
+{
+	struct kvm_memory_slot *n_memslot;
+	gfn_t n_gfn;
+
+	if (gp->svm_state != SVM_SECURE)
+		return 0;
+
+	printk(KERN_DEBUG "fault for ea=%#lx n_gpa=%#lx\n", ea, n_gpa);
+
+	n_gfn = n_gpa >> PAGE_SHIFT;
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID)) {
+		printk(KERN_DEBUG "no slot for n_gfn=%#llx should emulate mmio\n", n_gfn);
+		return 0;
+	}
+
+	return -1;
+}
+
+/*
  * Operations that need to call into the nested hypervisor should be
  * dispatched from here using kvmppc_uv_do_work. After L1 handles the
  * hypercall and calls into H_ENTER_NESTED, we detour here before
@@ -861,10 +908,15 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
  */
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
+	struct uv_worker *worker = vcpu->arch.uv_worker;
 	unsigned long opcode;
 
 	if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL) {
-		opcode = kvmppc_get_gpr(vcpu, 3);
+		if (worker && worker->opcode)
+			opcode = worker->opcode;
+		else
+			opcode = kvmppc_get_gpr(vcpu, 3);
+
 		return kvmppc_uv_do_hcall(vcpu, opcode);
 	}
 
