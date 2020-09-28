@@ -9,6 +9,11 @@ struct kvm_nested_memslots;
 
 #ifdef CONFIG_PPC_UV_EMULATE
 
+enum svm_state {
+	SVM_SECURE = 1,
+	SVM_ABORT,
+};
+
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r);
 int kvmppc_init_nested_slots(struct kvm_nested_guest *gp);
 void kvmppc_free_nested_slots(struct kvm_nested_guest *gp);
