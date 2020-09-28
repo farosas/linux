@@ -9,9 +9,12 @@
 #include <linux/kvm_host.h>
 #include <linux/bsearch.h>
 #include <linux/kthread.h>
+#include <linux/bsearch.h>
+#include <linux/libfdt.h>
 
 #include <asm/kvm_ppc.h>
 #include <asm/ultravisor-api.h>
+#include <asm/ultravisor.h>
 
 /*
  * L1 code currently only supports 64k pages in L2. See "Notes on page
@@ -19,6 +22,8 @@
  */
 #define L2_PAGE_SHIFT 16
 #define L2_PAGE_SIZE (1ULL << L2_PAGE_SHIFT)
+
+#define RTAS_BOUNCE_BUFFER_PAGES 4
 
 typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 
@@ -747,6 +752,137 @@ out:
 	return r;
 }
 
+static kvm_pfn_t uv_ngfn_to_pfn(struct kvm_vcpu *vcpu, gfn_t n_gfn)
+{
+	struct kvm *kvm = vcpu->kvm;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	struct kvm_memory_slot *n_memslot;
+	unsigned long rmap;
+	pte_t *ptep, pte;
+	int r;
+
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID))
+		return KVM_PFN_NOSLOT;
+
+	rmap = n_memslot->arch.rmap[n_gfn];
+
+	if (!uv_gfn_paged_in(rmap)) {
+		r = kvmppc_page_in_hcall(vcpu, n_gfn << L2_PAGE_SHIFT, H_PAGE_IN_NONSHARED);
+		if (r)
+			return KVM_PFN_ERR_FAULT;
+	}
+
+	pte = __pte(0);
+	spin_lock(&kvm->mmu_lock);
+	ptep = __find_linux_pte(gp->shadow_pgtable, n_gfn << L2_PAGE_SHIFT, NULL, NULL);
+	if (ptep)
+		pte = *ptep;
+	spin_unlock(&kvm->mmu_lock);
+
+	if (pte_present(pte))
+		return pte_pfn(pte);
+
+	return KVM_PFN_ERR_FAULT;
+}
+
+static void *uv_ngfn_to_hva(struct kvm_vcpu *vcpu, gfn_t n_gfn)
+{
+	kvm_pfn_t pfn;
+
+	pfn = uv_ngfn_to_pfn(vcpu, n_gfn);
+	if (is_error_pfn(pfn))
+		return NULL;
+
+	return __va(pfn_to_hpa(pfn));
+}
+
+static void *uv_ngpa_to_hva(struct kvm_vcpu *vcpu, gpa_t n_gpa)
+{
+	void *hva;
+
+	hva = uv_ngfn_to_hva(vcpu, n_gpa >> L2_PAGE_SHIFT);
+	if (hva)
+		hva += n_gpa & (L2_PAGE_SIZE - 1);
+	return hva;
+}
+
+static int kvmppc_uv_copy_tofrom_nested(struct kvm_vcpu *vcpu, gfn_t n_gfn, void *buf, size_t size, bool from)
+{
+	void *src, *dst, *hva;
+	unsigned long chunk;
+
+	while (size) {
+		hva = uv_ngfn_to_hva(vcpu, n_gfn);
+		if (!hva)
+			return -EINVAL;
+
+		if (from) {
+			src = hva;
+			dst = buf;
+		} else {
+			src = buf;
+			dst = hva;
+		}
+
+		chunk = min(size, (size_t)L2_PAGE_SIZE);
+
+		memcpy(dst, src, chunk);
+
+		n_gfn++;
+		buf += chunk;
+		size -= chunk;
+	};
+
+	return 0;
+}
+
+static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp, gpa_t dt_hdr)
+{
+	int r;
+	void *buf;
+	size_t size;
+	gfn_t n_gfn;
+	unsigned long *hva;
+
+	if (!gp)
+		return -EINVAL;
+
+	printk(KERN_DEBUG "%s device-tree header ngpa=%#llx\n", __func__, dt_hdr);
+
+	hva = uv_ngpa_to_hva(vcpu, dt_hdr);
+	if (!hva)
+		return -EINVAL;
+
+	/*
+	 * Copy the device-tree out of the L2 guest memory so that we
+	 * have it in contiguous pages in L0.
+	 */
+
+	size = fdt_totalsize(hva);
+	buf = kzalloc(size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	n_gfn = dt_hdr >> L2_PAGE_SHIFT;
+	r = kvmppc_uv_copy_tofrom_nested(vcpu, n_gfn, buf, size, true);
+	if (r)
+		goto out_free;
+
+	r = uv_fdt_reserve_mem(buf, RTAS_BOUNCE_BUFFER_PAGES, L2_PAGE_SIZE, &gp->rtas_buf);
+	if (r)
+		goto out_free;
+
+	printk(KERN_DEBUG "%s reserved ngpa=%#llx\n", __func__, gp->rtas_buf);
+
+	size = fdt_totalsize(buf);
+	r = kvmppc_uv_copy_tofrom_nested(vcpu, n_gfn, buf, size, false);
+
+out_free:
+	kfree(buf);
+	return r;
+}
+
 /*
  * Handle the UV_ESM ucall.
  * r4 = secure guest's kernel base address
@@ -785,6 +921,12 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	r = kvmppc_page_in_from_hv_all(vcpu, vcpu->arch.nested);
 	if (r) {
 		printk(KERN_DEBUG "%s: page in all failed (%d)\n", __func__, r);
+		goto abort;
+	}
+
+	r = kvmppc_uv_reserve_rtas_buffer(vcpu, vcpu->arch.nested, fdt);
+	if (r) {
+		printk(KERN_DEBUG "%s: rtas buffer reservation failed (%d)\n", __func__, r);
 		goto abort;
 	}
 
