@@ -215,6 +215,11 @@ static int hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs, ...)
 	return 0;
 }
 
+int kvmppc_page_in_hcall(struct kvm_vcpu *vcpu, gpa_t gpa, int type)
+{
+	return hcall(vcpu, H_SVM_PAGE_IN, 3, gpa, type, L2_PAGE_SHIFT);
+}
+
 static int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
 {
 	struct kvm_nested_memslots *slots;
@@ -706,6 +711,62 @@ out:
 	return ret;
 }
 
+static int kvmppc_page_in_from_hv(struct kvm_vcpu *vcpu, struct kvm_memory_slot *n_memslot, gfn_t start_gfn, unsigned long npages)
+{
+	enum uv_gpf_state state;
+	unsigned long *rmapp;
+	gfn_t n_gfn;
+	int r = 0;
+
+	if (!npages)
+		return -EINVAL;
+
+	for (n_gfn = start_gfn; n_gfn < start_gfn + npages; n_gfn++) {
+		rmapp = &n_memslot->arch.rmap[n_gfn];
+		lock_rmap(rmapp);
+
+		state = uv_gpf_state(*rmapp);
+
+		if (uv_gfn_paged_in(*rmapp) || state != GPF_SECURE) {
+			unlock_rmap(rmapp);
+			continue;
+		}
+
+		unlock_rmap(rmapp);
+
+		r = kvmppc_page_in_hcall(vcpu, n_gfn << L2_PAGE_SHIFT, H_PAGE_IN_NONSHARED);
+		if (r)
+			break;
+	}
+
+	return r;
+}
+
+static int kvmppc_page_in_from_hv_all(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp)
+{
+	struct kvm_memory_slot *n_memslot;
+	int r;
+
+	if (!gp)
+		return -EINVAL;
+
+	if (gp->svm_state == SVM_SECURE)
+		return -EPERM;
+
+	mutex_lock(&gp->slots_lock);
+	kvm_for_each_memslot(n_memslot, gp->memslots) {
+		r = kvmppc_page_in_from_hv(vcpu, n_memslot,
+					   n_memslot->base_gfn,
+					   n_memslot->npages);
+		if (r)
+			goto out;
+	}
+out:
+	mutex_unlock(&gp->slots_lock);
+	printk(KERN_DEBUG "%s ret=%d", __func__, r);
+	return r;
+}
+
 /*
  * Handle the UV_ESM ucall.
  * r4 = secure guest's kernel base address
@@ -739,6 +800,12 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	r = hcall(vcpu, H_SVM_INIT_START, 0);
 	if (r)
 		goto abort;
+
+	r = kvmppc_page_in_from_hv_all(vcpu, vcpu->arch.nested);
+	if (r) {
+		printk(KERN_DEBUG "%s: page in all failed (%d)\n", __func__, r);
+		goto abort;
+	}
 
 	r = hcall(vcpu, H_SVM_INIT_DONE, 0);
 	if (r)
