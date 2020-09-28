@@ -940,9 +940,9 @@ static void kvmhv_free_memslot_nest_rmap(struct kvm_memory_slot *free)
 	}
 }
 
-static bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
-					struct kvm_nested_guest *gp,
-					long gpa, int *shift_ret)
+bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
+				 struct kvm_nested_guest *gp,
+				 long gpa, int *shift_ret)
 {
 	struct kvm *kvm = vcpu->kvm;
 	bool ret = false;
@@ -1285,9 +1285,9 @@ static inline int kvmppc_radix_shift_to_level(int shift)
 	return 0;
 }
 
-static long int kvm_hv_insert_shadow_pte(struct kvm *kvm, struct kvm_nested_guest *gp,
-					 pte_t pte, unsigned long n_gpa, long int level,
-					 unsigned long *rmapp, long mmu_seq)
+long int kvmhv_insert_shadow_pte(struct kvm *kvm, struct kvm_nested_guest *gp,
+					pte_t pte, unsigned long n_gpa, long int level,
+					unsigned long *rmapp, long mmu_seq)
 {
 	struct rmap_nested *n_rmap;
 	long int ret;
