@@ -1344,6 +1344,11 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 	/* Convert the nested guest real address into a L1 guest real address */
 
 	n_gpa = vcpu->arch.fault_gpa & ~0xF000000000000FFFULL;
+
+	ret = kvmppc_uv_page_fault(gp, ea, n_gpa);
+	if (ret)
+		return ret;
+
 	if (!(dsisr & DSISR_PRTABLE_FAULT))
 		n_gpa |= ea & 0xFFF;
 	ret = kvmhv_translate_addr_nested(vcpu, gp, n_gpa, dsisr, &gpte);
