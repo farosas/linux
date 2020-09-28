@@ -925,6 +925,15 @@ static int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
 						   (unsigned int)kvmppc_get_gpr(vcpu, 4),
 						   (short)kvmppc_get_gpr(vcpu, 5));
 		break;
+	case UV_PAGE_IN:
+	case UV_PAGE_OUT:
+		ret = kvmppc_uv_handle_paging(vcpu, req,
+					      (unsigned int)kvmppc_get_gpr(vcpu, 4),
+					      (gpa_t)kvmppc_get_gpr(vcpu, 5),
+					      (gpa_t)kvmppc_get_gpr(vcpu, 6),
+					      kvmppc_get_gpr(vcpu, 7),
+					      kvmppc_get_gpr(vcpu, 8));
+		break;
 	default:
 		return RESUME_HOST;
 	}

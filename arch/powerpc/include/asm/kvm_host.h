@@ -240,6 +240,7 @@ struct revmap_entry {
 /* Free bits which can be used to define a new usage */
 #define KVMPPC_RMAP_TYPE_MASK	0xff00000000000000
 #define KVMPPC_RMAP_NESTED	0xc000000000000000	/* Nested rmap array */
+#define KVMPPC_RMAP_UV_GFN	0x0200000000000000
 #define KVMPPC_RMAP_HPT		0x0100000000000000	/* HPT guest */
 
 /*
@@ -256,6 +257,12 @@ struct revmap_entry {
 #define KVMPPC_RMAP_REFERENCED	(HPTE_R_R << KVMPPC_RMAP_RC_SHIFT)
 #define KVMPPC_RMAP_PRESENT	0x100000000ul
 #define KVMPPC_RMAP_INDEX	0xfffffffful
+
+/*
+ * rmap bits for KVM UV tracking of GFNs
+ * 0x000000000000000f	guest page frame state
+ */
+#define KVMPPC_RMAP_UV_GPF_STATE_MASK	0xf
 
 struct kvm_arch_memory_slot {
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
