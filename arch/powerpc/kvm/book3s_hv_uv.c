@@ -957,6 +957,91 @@ int kvmppc_uv_fault_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	kvmppc_uv_worker_exit(worker, ret);
 }
 
+static void rtas_copy_args(struct rtas_args *dst, struct rtas_args *src)
+{
+	int i, nargs, nret;
+
+	nargs = be32_to_cpu(src->nargs);
+	nret = be32_to_cpu(src->nret);
+
+	dst->token = src->token;
+	dst->nargs = src->nargs;
+	dst->nret  = src->nret;
+	dst->rets = &(dst->args[nargs]);
+
+	for (i = 0; i < nargs; ++i)
+		dst->args[i] = src->args[i];
+
+	for (i = 0; i < nret; ++i)
+		dst->rets[i] = src->rets[i];
+}
+
+/*
+ * The RTAS buffer provided by the nested guest needs to be shared
+ * with its nested hypervisor, but we can only share at the page
+ * granularity, so to avoid leaking data that is in the same page as
+ * the RTAS buffer we need to copy the nested guest-provided buffer
+ * into a different area.
+ */
+int kvmppc_uv_rtas_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	gpa_t arg_buf = kvmppc_get_gpr(vcpu, 4) & KVM_PAM;
+	struct rtas_args *args, *bargs;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	unsigned long ret = -1;
+	int i, nret, nargs;
+
+	if (!gp)
+		goto out;
+
+	/* Read the nested guest RTAS argument buffer */
+	args = (struct rtas_args *)uv_ngpa_to_hva(vcpu, arg_buf);
+	if (!args)
+		goto out;
+	printk(KERN_DEBUG "%s: orig gpa= %#llx token= %#x nargs= %#x, nret= %#x, rets= %#lx\n", __func__,
+	       arg_buf, be32_to_cpu(args->token), be32_to_cpu(args->nargs), be32_to_cpu(args->nret),
+	       (unsigned long)args->rets);
+
+	/* Copy the nested guest RTAS argument buffer into the bounce buffer */
+	bargs = (struct rtas_args *)uv_ngpa_to_hva(vcpu, gp->rtas_buf);
+	if (!bargs) {
+		printk(KERN_DEBUG "bargs= %#lx\n", (unsigned long)bargs);
+		goto out;
+	}
+
+	rtas_copy_args(bargs, args);
+
+	/* Update 'rets' to use the guest physical address of the new buffer */
+	nargs = be32_to_cpu(bargs->nargs);
+	bargs->rets = (void *)(gp->rtas_buf +
+			       offsetof(struct rtas_args, args) +
+			       (nargs * sizeof(rtas_arg_t)));
+
+	printk(KERN_DEBUG "%s: bounce gpa= %#llx token= %#x nargs= %#x, nret= %#x, args= %#lx, rets= %#lx\n", __func__,
+	       gp->rtas_buf, be32_to_cpu(bargs->token), be32_to_cpu(bargs->nargs), be32_to_cpu(bargs->nret),
+	       (unsigned long)bargs->args, (unsigned long)bargs->rets);
+
+	/*
+	 * Proceed with the RTAS call, but replace the original
+	 * argument buffer with the bounce buffer.
+	 */
+	hcall(vcpu, H_RTAS, 1, gp->rtas_buf);
+
+	/* Restore 'rets' to a host virtual address */
+	bargs->rets = &(bargs->args[nargs]);
+
+	/* Copy the results back to the nested guest buffer */
+	nret = be32_to_cpu(args->nret);
+	for (i = 0; i < nret; ++i)
+		args->rets[i] = bargs->rets[i];
+
+	ret = 0;
+out:
+	kvmppc_uv_worker_exit(worker, ret);
+}
+
 /*
  * Handles hypercalls issued by the nested guest when emulating an
  * ultravisor in a system without SMF. This includes what the nested
@@ -976,10 +1061,29 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 		if (ret == U_NO_MEM)
 			return U_RETRY;
 		break;
+	case H_RTAS:
+		if (vcpu->arch.nested->svm_state != SVM_SECURE)
+			return RESUME_HOST;
+
+		ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_rtas_work_fn, opcode);
+
+		if (ret == U_TOO_HARD)
+			return RESUME_HOST;
+
+		/*
+		 * The RTAS call returns errors via the argument
+		 * buffer, so this is an error during our handling of
+		 * the RTAS call instead.
+		 */
+		if (ret)
+			return ret;
+
+		return RESUME_GUEST;
 	default:
 		return RESUME_HOST;
 	}
 	kvmppc_set_gpr(vcpu, 3, ret);
+	vcpu->arch.hcall_needed = 0;
 	return RESUME_GUEST;
 }
 
