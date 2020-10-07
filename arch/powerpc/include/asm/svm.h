@@ -9,10 +9,11 @@
 #define _ASM_POWERPC_SVM_H
 
 #ifdef CONFIG_PPC_SVM
+extern bool svm_cmdline_enabled;
 
 static inline bool is_secure_guest(void)
 {
-	return mfmsr() & MSR_S;
+	return (mfmsr() & MSR_S) || svm_cmdline_enabled;
 }
 
 void dtl_cache_ctor(void *addr);

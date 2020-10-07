@@ -6,11 +6,20 @@
  * Author: Anshuman Khandual <khandual@linux.vnet.ibm.com>
  */
 
+#include <linux/kernel.h>
 #include <linux/mm.h>
 #include <asm/machdep.h>
 #include <asm/svm.h>
 #include <asm/swiotlb.h>
 #include <asm/ultravisor.h>
+
+bool svm_cmdline_enabled;
+
+static int __init early_svm_cmdline(char *arg)
+{
+	return (kstrtobool(arg, &svm_cmdline_enabled) == 0);
+}
+early_param("svm", early_svm_cmdline);
 
 static int __init init_svm(void)
 {
