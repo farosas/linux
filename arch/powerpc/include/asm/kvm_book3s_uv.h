@@ -27,6 +27,8 @@ unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int l
 unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 				      unsigned int lpid, gpa_t gpa, gpa_t n_gpa,
 				      unsigned long flags, unsigned long order);
+unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid, gpa_t n_gpa,
+				   unsigned long order);
 int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned long n_gpa);
 #else
 struct uv_worker;
@@ -63,6 +65,12 @@ static inline unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, 
 static inline unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 						    unsigned int lpid, gpa_t gpa, gpa_t n_gpa,
 						    unsigned long flags, unsigned long order)
+{
+	return U_FUNCTION;
+}
+
+static inline unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid,
+						 gpa_t n_gpa, unsigned long order)
 {
 	return U_FUNCTION;
 }
