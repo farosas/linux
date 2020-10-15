@@ -1285,13 +1285,32 @@ static inline int kvmppc_radix_shift_to_level(int shift)
 	return 0;
 }
 
+static long int kvm_hv_insert_shadow_pte(struct kvm *kvm, struct kvm_nested_guest *gp,
+					 pte_t pte, unsigned long n_gpa, long int level,
+					 unsigned long *rmapp, long mmu_seq)
+{
+	struct rmap_nested *n_rmap;
+	long int ret;
+
+	n_rmap = kzalloc(sizeof(*n_rmap), GFP_KERNEL);
+	if (!n_rmap)
+		return RESUME_GUEST; /* Let the guest try again */
+
+	n_rmap->rmap = (n_gpa & RMAP_NESTED_GPA_MASK) |
+		(((unsigned long) gp->l1_lpid) << RMAP_NESTED_LPID_SHIFT);
+
+	ret = kvmppc_create_pte(kvm, gp->shadow_pgtable, pte, n_gpa, level,
+				mmu_seq, gp->shadow_lpid, rmapp, &n_rmap);
+	kfree(n_rmap);
+	return ret;
+}
+
 /* called with gp->tlb_lock held */
 static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 					  struct kvm_nested_guest *gp)
 {
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_memory_slot *memslot;
-	struct rmap_nested *n_rmap;
 	struct kvmppc_pte gpte;
 	pte_t pte, *pte_p;
 	unsigned long mmu_seq;
@@ -1436,15 +1455,9 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 
 	/* 4. Insert the pte into our shadow_pgtable */
 
-	n_rmap = kzalloc(sizeof(*n_rmap), GFP_KERNEL);
-	if (!n_rmap)
-		return RESUME_GUEST; /* Let the guest try again */
-	n_rmap->rmap = (n_gpa & RMAP_NESTED_GPA_MASK) |
-		(((unsigned long) gp->l1_lpid) << RMAP_NESTED_LPID_SHIFT);
 	rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
-	ret = kvmppc_create_pte(kvm, gp->shadow_pgtable, pte, n_gpa, level,
-				mmu_seq, gp->shadow_lpid, rmapp, &n_rmap);
-	kfree(n_rmap);
+	ret = kvmhv_insert_shadow_pte(kvm, gp, pte, n_gpa, level, rmapp, mmu_seq);
+
 	if (ret == -EAGAIN)
 		ret = RESUME_GUEST;	/* Let the guest try again */
 
