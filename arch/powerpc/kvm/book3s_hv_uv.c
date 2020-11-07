@@ -35,6 +35,8 @@
  * knowledge.
  */
 #define SHARE_EXPLICIT	0
+#define SHARE_IMPLICIT	1
+#define SHARE_PSEUDO	2
 
 typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 
@@ -69,18 +71,22 @@ enum uv_gpf_state {
 	GPF_PSEUDO_SHARED_INV,
 };
 
+/*
+ * We generalize the individual guest page frame states into broader
+ * categories as follows.
+ */
 #define __GPF_SECURE	(BIT(GPF_SECURE) | BIT(GPF_PAGEDOUT))
 #define __GPF_SHARED	(BIT(GPF_SHARED) | BIT(GPF_SHARED_INV))
+#define __GPF_HV_SHARED	(BIT(GPF_HV_SHARED) | BIT(GPF_HV_SHARED_INV))
 #define __GPF_SHARED_IMPLICIT	(BIT(GPF_SHARED_IMPLICIT) |	\
 				 BIT(GPF_SHARED_IMPLICIT_INV))
 #define __GPF_PSEUDO_SHARED	(BIT(GPF_PSEUDO_SHARED) |	\
 				 BIT(GPF_PSEUDO_SHARED_INV))
-#define __GPF_HV	(BIT(GPF_HV_SHARED) |		\
-			 BIT(GPF_HV_SHARING) |		\
-			 BIT(GPF_HV_UNSHARING) |	\
-			 BIT(GPF_HV_UNSHARED) |		\
-			 BIT(GPF_HV_SHARED_INV) |	\
-			 BIT(GPF_HV_UNSHARING_INV))
+
+#define __GPF_HV_UNSHARED	(BIT(GPF_HV_SHARING) |			\
+				 BIT(GPF_HV_UNSHARING) |		\
+				 BIT(GPF_HV_UNSHARED) |			\
+				 BIT(GPF_HV_UNSHARING_INV))
 
 #define __GPF_PRESENT	(BIT(GPF_SHARED) |		\
 			 BIT(GPF_SHARED_IMPLICIT) |	\
@@ -88,24 +94,25 @@ enum uv_gpf_state {
 			 BIT(GPF_HV_UNSHARING) |	\
 			 BIT(GPF_PSEUDO_SHARED))
 
-#define __GPF_INVAL	(BIT(GPF_SHARED_INV) |		\
-			 BIT(GPF_SHARED_IMPLICIT_INV) |	\
-			 BIT(GPF_HV_SHARED_INV) |	\
-			 BIT(GPF_HV_UNSHARING_INV) |	\
+#define __GPF_INVAL	(BIT(GPF_SHARED_INV) |			\
+			 BIT(GPF_SHARED_IMPLICIT_INV) |		\
+			 BIT(GPF_HV_SHARED_INV) |		\
+			 BIT(GPF_HV_UNSHARING_INV) |		\
 			 BIT(GPF_PSEUDO_SHARED_INV))
 
-/*
- * We generalize the individual guest page frame states into broader
- * categories as follows.
- */
-#define GPF_TYPE_SECURE		(__GPF_SECURE)
-#define GPF_TYPE_TRANSIENT	(__GPF_HV)
-#define GPF_TYPE_UNSHAREABLE	(__GPF_SHARED_IMPLICIT | __GPF_PSEUDO_SHARED)
-#define GPF_TYPE_SHARED		(__GPF_SHARED | GPF_TYPE_UNSHAREABLE)
-#define GPF_TYPE_PRESENT	(__GPF_PRESENT)
-#define GPF_TYPE_INVALIDATED	(__GPF_INVAL)
+#define GPF_TYPE_SECURE __GPF_SECURE
+#define GPF_TYPE_SHARED (__GPF_SHARED | __GPF_SHARED_IMPLICIT | __GPF_PSEUDO_SHARED)
+#define GPF_TYPE_HV_SHARED __GPF_HV_SHARED
+#define GPF_TYPE_TRANSIENT (__GPF_HV_SHARED | __GPF_HV_UNSHARED)
+#define GPF_TYPE_UNSHAREABLE (__GPF_SHARED_IMPLICIT | __GPF_PSEUDO_SHARED)
+#define GPF_TYPE_PRESENT __GPF_PRESENT
+#define GPF_TYPE_INVALIDATED __GPF_INVAL
 
-#define GPF_TYPE(state) BIT(state)
+
+static inline bool gpf_type(enum uv_gpf_state state, unsigned long type)
+{
+	return (BIT(state) & type);
+}
 
 #ifdef DEBUG
 static const char *gpf_state_names[] = {
@@ -126,22 +133,20 @@ static const char *gpf_state_names[] = {
 };
 
 #define print_if_type(x, y) do {		\
-		if (x & y)			\
+		if(gpf_type(x, y))		\
 			pr_cont(" %s", #y);	\
 	} while (0)				\
 
 static void uv_print_gpf_state(const char* func, enum uv_gpf_state state)
 {
-	unsigned long type = GPF_TYPE(state);
-
 	pr_debug("%s: gpf state: %s", func, gpf_state_names[state]);
 
-	print_if_type(type, GPF_TYPE_SECURE);
-	print_if_type(type, GPF_TYPE_TRANSIENT);
-	print_if_type(type, GPF_TYPE_UNSHAREABLE);
-	print_if_type(type, GPF_TYPE_SHARED);
-	print_if_type(type, GPF_TYPE_PRESENT);
-	print_if_type(type, GPF_TYPE_INVALIDATED);
+	print_if_type(state, GPF_TYPE_SECURE);
+	print_if_type(state, GPF_TYPE_TRANSIENT);
+	print_if_type(state, GPF_TYPE_UNSHAREABLE);
+	print_if_type(state, GPF_TYPE_SHARED);
+	print_if_type(state, GPF_TYPE_PRESENT);
+	print_if_type(state, GPF_TYPE_INVALIDATED);
 	pr_cont("\n");
 }
 #else
@@ -150,22 +155,42 @@ static inline void uv_print_gpf_state(const char* func, enum uv_gpf_state state)
 }
 #endif
 
-static bool uv_gfn_rmap_valid(unsigned long rmap)
+static bool uv_rmap_valid(unsigned long rmap)
 {
 	return ((rmap & KVMPPC_RMAP_TYPE_MASK) == KVMPPC_RMAP_UV_GFN);
 }
 
-static enum uv_gpf_state uv_gfn_state(unsigned long rmap)
+static enum uv_gpf_state uv_gpf_state(unsigned long rmap)
 {
-	if (uv_gfn_rmap_valid(rmap))
-		return rmap & KVMPPC_RMAP_UV_GPF_STATE_MASK;
+	if (uv_rmap_valid(rmap))
+		return (rmap & KVMPPC_RMAP_UV_GPF_STATE_MASK) >> KVMPPC_RMAP_UV_GPF_STATE_SHIFT;
 	return GPF_SECURE;
 }
 
-static void uv_gfn_set_state(unsigned long *rmap, enum uv_gpf_state state)
+static void uv_rmap_set_state(unsigned long *rmap, enum uv_gpf_state state)
 {
-	*rmap = KVMPPC_RMAP_UV_GFN | (*rmap & ~KVMPPC_RMAP_UV_GPF_STATE_MASK) | state;
-	uv_print_gpf_state(__func__, state);
+	unsigned long s = state;
+
+	*rmap = KVMPPC_RMAP_UV_GFN | (*rmap & ~KVMPPC_RMAP_UV_GPF_STATE_MASK) |
+		(s << KVMPPC_RMAP_UV_GPF_STATE_SHIFT);
+}
+
+static gfn_t uv_rmap_gfn(unsigned long rmap)
+{
+	if (uv_rmap_valid(rmap))
+		return rmap & KVMPPC_RMAP_UV_GFN_MASK;
+	return 0;
+}
+
+static void uv_rmap_set_gfn(unsigned long *rmap, gfn_t gfn)
+{
+	*rmap = KVMPPC_RMAP_UV_GFN | (*rmap & ~KVMPPC_RMAP_UV_GFN_MASK) | gfn;
+}
+
+static void uv_rmap_update(unsigned long *rmap, enum uv_gpf_state state, gfn_t gfn)
+{
+	uv_rmap_set_state(rmap, state);
+	uv_rmap_set_gfn(rmap, gfn);
 }
 
 static struct uv_worker *kvmppc_uv_worker_init(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t fn, unsigned long opcode)
@@ -269,15 +294,20 @@ static unsigned long kvmppc_uv_do_work(struct kvm_vcpu *vcpu, kvm_vm_thread_fn_t
 	return ret;
 }
 
-static bool uv_gfn_paged_in(unsigned long rmap_entry)
+bool uv_in_progress(struct kvm_vcpu *vcpu)
 {
-	return (uv_gfn_rmap_valid(rmap_entry) && test_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, &rmap_entry));
+	return vcpu->arch.uv_worker;
 }
 
-static void uv_gfn_set_paged_in(unsigned long *rmap_entry)
+static bool uv_gfn_paged_in(unsigned long rmap)
 {
-	*rmap_entry |= KVMPPC_RMAP_UV_GFN;
-	set_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, rmap_entry);
+	return (uv_rmap_valid(rmap) && test_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, &rmap));
+}
+
+static void uv_gfn_set_paged_in(unsigned long *rmap)
+{
+	*rmap |= KVMPPC_RMAP_UV_GFN;
+	set_bit(KVMPPC_RMAP_UV_PAGED_IN_BIT, rmap);
 }
 
 static int hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs, ...)
@@ -315,6 +345,15 @@ static int hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs, ...)
 	}
 
 	return 0;
+}
+
+static void kvmppc_uv_abort_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+
+	printk(KERN_DEBUG "SVM ABORT!\n\n");
+	kvmppc_uv_worker_exit(worker, H_PARAMETER);
 }
 
 int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
@@ -645,6 +684,7 @@ unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int l
 	return ret;
 }
 
+/* called with rmap lock taken */
 static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 				       struct kvm_nested_guest *gp,
 				       gpa_t gpa, gpa_t n_gpa,
@@ -664,10 +704,15 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 	gfn = gpa >> PAGE_SHIFT;
 	n_gfn = n_gpa >> page_shift;
 
-	state = uv_gfn_state(*rmapp);
+	state = uv_gpf_state(*rmapp);
 
-	vcpu_debug(vcpu, "%s gpa:%#llx ngpa:%#llx state:%s", __func__, gpa, n_gpa,
-		   gpf_state_names[state]);
+/*	if (gp->svm_state == SVM_SECURE)
+		vcpu_debug(vcpu, "%s gpa:%#llx ngpa:%#llx state:%s", __func__, gpa, n_gpa,
+			   gpf_state_names[state]);
+*/
+	if (n_gfn == 0xfd42)
+		vcpu_debug(vcpu, "%s gpa:%#llx ngpa:%#llx state:%s\n\n", __func__, gpa, n_gpa,
+			   gpf_state_names[state]);
 
 	switch (state) {
 	case GPF_HV_SHARING:
@@ -676,6 +721,9 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 		 * hypervisor and it has acknowledged it.
 		 */
 		state = GPF_HV_SHARED;
+		uv_rmap_update(rmapp, state, gfn);
+//		uv_print_gpf_state(__func__, state);
+
 		break;
 	case GPF_HV_SHARED:
 		/* The page is ready to be shared. */
@@ -684,15 +732,14 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 		break;
 	}
 
-	uv_gfn_set_state(rmapp, state);
-
-	if (GPF_TYPE(state) & GPF_TYPE_TRANSIENT) {
+	if (gpf_type(state, GPF_TYPE_TRANSIENT)) {
 		/*
 		 * The page is ready to be shared, but we might be
 		 * sharing other pages as well, so we will wait until
 		 * all pages have the HV_SHARED state.
 		 */
 		vcpu_debug(vcpu, "%s transient page, return", __func__);
+		unlock_rmap(rmapp);
 		return U_SUCCESS;
 	}
 
@@ -738,7 +785,7 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 	if (r || !pte_present(pte))
 		return U_BUSY;
 
-	uv_gfn_set_state(rmapp, GPF_SECURE);
+	uv_rmap_set_state(rmapp, GPF_SECURE);
 
 	return U_SUCCESS;
 }
@@ -759,7 +806,7 @@ static unsigned long kvmppc_uv_page_out(struct kvm_vcpu *vcpu,
 
 	gfn = gpa >> PAGE_SHIFT;
 	n_gfn = n_gpa >> page_shift;
-	state = uv_gfn_state(*rmapp);
+	state = uv_gpf_state(*rmapp);
 
 	if (state == GPF_HV_UNSHARED)
 		return U_RETRY;
@@ -787,7 +834,7 @@ static unsigned long kvmppc_uv_page_out(struct kvm_vcpu *vcpu,
 			return U_P2;
 	}
 
-	uv_gfn_set_state(rmapp, GPF_PAGEDOUT);
+	uv_rmap_set_state(rmapp, GPF_PAGEDOUT);
 
 	return U_SUCCESS;
 }
@@ -856,6 +903,7 @@ unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 	}
 
 out:
+	unlock_rmap(rmapp);
 	kvmhv_put_nested(gp);
 	return ret;
 }
@@ -893,16 +941,17 @@ unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid,
 		goto out;
 
 	rmapp = &n_memslot->arch.rmap[n_gfn];
-	state = uv_gfn_state(*rmapp);
+	lock_rmap(rmapp);
+	state = uv_gpf_state(*rmapp);
 
-	if (GPF_TYPE(state) & GPF_TYPE_INVALIDATED){
+	if (gpf_type(state, GPF_TYPE_INVALIDATED)){
 		ret = U_SUCCESS;
 		goto out;
 	}
 
-	if (GPF_TYPE(state) & GPF_TYPE_PRESENT) {
+	if (gpf_type(state, GPF_TYPE_PRESENT)) {
 		kvmhv_invalidate_shadow_pte(vcpu, gp, n_gpa, NULL);
-		uv_gfn_set_state(rmapp, state << 1);
+		uv_rmap_set_state(rmapp, state << 1);
 
 		if (n_gpa == gp->rtas_buf)
 			printk(KERN_ERR "invalidate rtas buf!\n");
@@ -932,7 +981,7 @@ static int kvmppc_page_in_from_hv(struct kvm_vcpu *vcpu, unsigned long *rmap, gf
 	for (gfn = start_gfn; gfn < start_gfn + npages; gfn++) {
 
 		if (uv_gfn_paged_in(rmap[gfn]) ||
-		    uv_gfn_state(rmap[gfn]) != GPF_SECURE)
+		    uv_gpf_state(rmap[gfn]) != GPF_SECURE)
 			continue;
 		r = kvmppc_page_in_hcall(vcpu, gfn_to_gpa(gfn), H_PAGE_IN_NONSHARED);
 		if (r) {
@@ -972,22 +1021,134 @@ out:
 	return r;
 }
 
-static unsigned long kvmppc_page_in_from_hv_shared(struct kvm_vcpu *vcpu, gfn_t start_gfn,
-						   unsigned long npages, int type)
+static void kvmppc_commit_shared_gfns(struct kvm_vcpu *vcpu, gfn_t start_gfn,
+				      unsigned long npages, int type)
+{
+	struct kvm_memory_slot *memslot, *n_memslot;
+	struct kvm *kvm = vcpu->kvm;
+	unsigned long mmu_seq, *rmapp, *l1_rmapp;
+	enum uv_gpf_state state;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	gfn_t n_gfn, gfn;
+	pte_t pte, *ptep;
+	int level, page_shift, r;
+
+	printk(KERN_DEBUG "commit shared pages for n_gfn:%#llx\n", start_gfn);
+
+	if (!gp) {
+		printk(KERN_DEBUG "%s called in L1 context!\n", __func__);
+		goto abort;
+	}
+
+	n_memslot = gfn_to_nested_memslot(gp->memslots, start_gfn);
+
+	for (n_gfn = start_gfn; n_gfn < start_gfn + npages; n_gfn++) {
+		rmapp = &n_memslot->arch.rmap[n_gfn];
+
+		lock_rmap(rmapp);
+
+		state = uv_gpf_state(*rmapp);
+//		uv_print_gpf_state(__func__, state);
+
+		if (gpf_type(state, GPF_TYPE_SHARED)) {
+			unlock_rmap(rmapp);
+			continue;
+		}
+
+		if (!gpf_type(state, GPF_TYPE_HV_SHARED))
+			goto abort;
+
+		gfn = uv_rmap_gfn(*rmapp);
+
+		if (type == SHARE_PSEUDO) {
+			uv_rmap_update(rmapp, GPF_PSEUDO_SHARED, gfn);
+			unlock_rmap(rmapp);
+			continue;
+		}
+
+		if (type == SHARE_IMPLICIT)
+			state = GPF_SHARED_IMPLICIT;
+		else
+			state = GPF_SHARED;
+
+		uv_rmap_set_state(rmapp, state);
+
+		if (!gfn) {
+			printk(KERN_DEBUG "%s shared page was invalidated\n\n", __func__);
+			//	rc = svm_page_invalidate(svm, gpa, state);
+			unlock_rmap(rmapp);
+			break;
+		}
+
+		memslot = gfn_to_memslot(kvm, gfn);
+		if (!memslot || (memslot->flags & KVM_MEMSLOT_INVALID))
+			goto abort;
+
+		/* Look for n_gra -> hra translation in the shadow page table for l2 */
+
+		mmu_seq = kvm->mmu_notifier_seq;
+		smp_rmb();
+
+		spin_lock(&kvm->mmu_lock);
+		ptep = find_kvm_nested_guest_pte(kvm, gp->l1_lpid, n_gfn << L2_PAGE_SHIFT, &page_shift);
+		spin_unlock(&kvm->mmu_lock);
+		if (ptep && pte_present(*ptep)) {
+			printk(KERN_DEBUG "%s found shadow pte for gfn %#llx n_gfn %#llx\n", __func__, gfn, n_gfn);
+			unlock_rmap(rmapp);
+			continue;
+		}
+
+		printk(KERN_DEBUG "%s insert new shadow pte for gfn %#llx n_gfn %#llx\n", __func__, gfn, n_gfn);
+		/* Insert new n_gra -> hra pte in the shadow page table for l2 */
+
+		level = (page_shift == PMD_SHIFT) ? 1 : 0;
+		l1_rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
+		r = kvmhv_insert_shadow_pte(kvm, gp, pte, n_gfn << L2_PAGE_SHIFT, level, l1_rmapp, mmu_seq);
+		if (r)
+			goto abort;
+
+		/* Reinstate gra -> hra translation in our partition scoped tables for l1 */
+
+		pte = __pte(0);
+		spin_lock(&kvm->mmu_lock);
+		ptep = find_kvm_secondary_pte(kvm, gfn << PAGE_SHIFT, NULL);
+		if (ptep)
+			pte = *ptep;
+		spin_unlock(&kvm->mmu_lock);
+
+		if (!pte_present(pte)) {
+			printk(KERN_DEBUG "%s insert new L1 pte for gfn %#llx n_gfn %#llx\n", __func__, gfn, n_gfn);
+			r = kvmppc_book3s_instantiate_page(vcpu, gfn << PAGE_SHIFT, memslot, true,
+							   false, &pte, NULL);
+			if (r)
+				goto abort;
+		}
+
+		unlock_rmap(rmapp);
+	}
+
+	return;
+abort:
+	printk(KERN_DEBUG "%s aborted!\n\n", __func__);
+	gp->svm_state = SVM_ABORT;
+	unlock_rmap(rmapp);
+	return;
+}
+
+static unsigned long kvmppc_page_in_from_hv_shared(struct kvm_vcpu *vcpu, gfn_t start_gfn, unsigned long npages)
 {
 	struct kvm_memory_slot *n_memslot;
-	struct kvm_nested_guest *gp = vcpu->arch.nested;
 	enum uv_gpf_state state;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
 	unsigned long *rmapp, ret;
 	gfn_t n_gfn;
 	int max_tries = 4;
 	int r;
 
+	vcpu_debug(vcpu, "sharing %#lx pages at %#llx", npages, start_gfn);
+
 	if (!gp)
 		return U_P2;
-
-	vcpu_debug(vcpu, "%s sharing ngfn:%#llx npages:%#lx", (type == SHARE_EXPLICIT ? "explicitly":"implicitly"),
-		   start_gfn, npages);
 
 	n_memslot = gfn_to_nested_memslot(gp->memslots, start_gfn);
 	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID) ||
@@ -998,21 +1159,21 @@ static unsigned long kvmppc_page_in_from_hv_shared(struct kvm_vcpu *vcpu, gfn_t 
 		rmapp = &n_memslot->arch.rmap[n_gfn];
 		lock_rmap(rmapp);
 
-		state = uv_gfn_state(*rmapp);
+		state = uv_gpf_state(*rmapp);
 		uv_print_gpf_state(__func__, state);
 
-		if (GPF_TYPE(state) & GPF_TYPE_SHARED) {
+		if (gpf_type(state, GPF_TYPE_SHARED)) {
 			unlock_rmap(rmapp);
 			continue;
 		}
 
-		if (GPF_TYPE(state) & GPF_TYPE_TRANSIENT) {
+		if (gpf_type(state, GPF_TYPE_TRANSIENT)) {
 			unlock_rmap(rmapp);
 			return U_P2;
 		}
 
 		if (state == GPF_PAGEDOUT)
-			printk(KERN_DEBUG "trying to share PAGEDOUT gfn!!\n\n");
+			printk(KERN_DEBUG "trying to share PAGEDOUT gfn %#llx!!\n\n", n_gfn);
 
 		while (state == GPF_PAGEDOUT && max_tries--) {
 			unlock_rmap(rmapp);
@@ -1021,16 +1182,15 @@ static unsigned long kvmppc_page_in_from_hv_shared(struct kvm_vcpu *vcpu, gfn_t 
 				goto rollback;
 			lock_rmap(rmapp);
 
-			state = uv_gfn_state(*rmapp);
+			state = uv_gpf_state(*rmapp);
 		}
 
 		if (!max_tries) {
-			ret = U_RETRY;
 			unlock_rmap(rmapp);
 			goto rollback;
 		}
 
-		uv_gfn_set_state(rmapp, GPF_HV_SHARING);
+		uv_rmap_set_state(rmapp, GPF_HV_SHARING);
 		unlock_rmap(rmapp);
 
 		r = kvmppc_page_in_hcall(vcpu, n_gfn << L2_PAGE_SHIFT, H_PAGE_IN_SHARED);
@@ -1038,13 +1198,9 @@ static unsigned long kvmppc_page_in_from_hv_shared(struct kvm_vcpu *vcpu, gfn_t 
 			goto rollback;
 	}
 
-	printk(KERN_DEBUG "commit shared pages for n_gfn:%#llx\n", start_gfn);
-//	commit_all_gfns_as_shared(rstate, gfn, npages, share_type);
 	return U_SUCCESS;
 
 rollback:
-	printk(KERN_DEBUG "rollback shared pages for n_gfn:%#llx\n", start_gfn);
-//		revert_transient_pages_to_secure(rstate, gfn, i+1);
 	return U_P2;
 }
 
@@ -1357,6 +1513,13 @@ int kvmppc_uv_share_page_work_fn(struct kvm *kvm, uintptr_t thread_data)
 		printk(KERN_DEBUG "share page failed ret= %d\n", (int)ret);
 	}
 
+	/*
+	 * Need to restore these so that the second part of the
+	 * sharing process (commit/rollback) can read them.
+	 */
+	kvmppc_set_gpr(vcpu, 4, n_gfn);
+	kvmppc_set_gpr(vcpu, 5, npages);
+
 	kvmppc_uv_worker_exit(worker, ret);
 }
 
@@ -1368,6 +1531,8 @@ int kvmppc_uv_share_page_work_fn(struct kvm *kvm, uintptr_t thread_data)
 static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 {
 	unsigned long ret = U_FUNCTION;
+	gfn_t n_gfn;
+	unsigned long npages;
 
 	switch (opcode) {
 	case UV_ESM:
@@ -1381,10 +1546,19 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 		break;
 	case UV_SHARE_PAGE:
 		printk(KERN_DEBUG "UV_SHARE_PAGE\n");
+
 		ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_share_page_work_fn, opcode);
 
 		if (ret == U_TOO_HARD)
 			return RESUME_HOST;
+
+		n_gfn = kvmppc_get_gpr(vcpu, 4);
+		npages = kvmppc_get_gpr(vcpu, 5);
+
+		if (ret == U_SUCCESS)
+			kvmppc_commit_shared_gfns(vcpu, n_gfn, npages, SHARE_EXPLICIT);
+		else
+			printk(KERN_DEBUG "rollback shared pages for n_gfn:%#llx\n", n_gfn);
 
 		break;
 	case UV_UNSHARE_PAGE:
@@ -1414,6 +1588,7 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 	default:
 		return RESUME_HOST;
 	}
+
 	kvmppc_set_gpr(vcpu, 3, ret);
 	vcpu->arch.hcall_needed = 0;
 	return RESUME_GUEST;
@@ -1449,7 +1624,7 @@ int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned
 	}
 
 	rmapp = &n_memslot->arch.rmap[n_gfn];
-	state = uv_gfn_state(*rmapp);
+	state = uv_gpf_state(*rmapp);
 	printk(KERN_DEBUG "n_gfn:%#llx state:%s\n", n_gfn, gpf_state_names[state]);
 	if (state == GPF_PAGEDOUT) {
 		printk(KERN_DEBUG "fault in paged out page, should call page in\n");
@@ -1478,10 +1653,31 @@ static long int kvmppc_uv_page_fault_exit(struct kvm_vcpu *vcpu)
 	return RESUME_GUEST;
 }
 
+static long int kvmppc_uv_abort_exit(struct kvm_vcpu *vcpu)
+{
+	unsigned long ret;
+
+	ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_abort_work_fn, 0);
+
+	if (ret == U_TOO_HARD)
+		return RESUME_HOST;
+
+	return RESUME_GUEST;
+}
+
+/*
+ * Functions called from here have the ability to call into the nested
+ * hypervisor using hypercalls.
+ */
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
 	struct uv_worker *worker = vcpu->arch.uv_worker;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
 	unsigned long opcode;
+	long int r;
+
+	if(gp->svm_state == SVM_ABORT)
+		goto abort;
 
 	if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL) {
 		if (worker && worker->opcode)
@@ -1489,7 +1685,11 @@ long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 		else
 			opcode = kvmppc_get_gpr(vcpu, 3);
 
-		return kvmppc_uv_do_hcall(vcpu, opcode);
+		r = kvmppc_uv_do_hcall(vcpu, opcode);
+
+		if(gp->svm_state == SVM_ABORT)
+			goto abort;
+		return r;
 	}
 
 	if (worker || r == RESUME_PAGE_FAULT) {
@@ -1497,4 +1697,7 @@ long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 	}
 
 	return r;
+
+abort:
+	return kvmppc_uv_abort_exit(vcpu);
 }

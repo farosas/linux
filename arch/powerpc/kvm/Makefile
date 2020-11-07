@@ -3,7 +3,7 @@
 # Makefile for Kernel-based Virtual Machine module
 #
 
-ccflags-y := -Ivirt/kvm -Iarch/powerpc/kvm
+ccflags-y := -Ivirt/kvm -Iarch/powerpc/kvm -DDEBUG
 KVM := ../../../virt/kvm
 
 common-objs-y = $(KVM)/kvm_main.o $(KVM)/eventfd.o

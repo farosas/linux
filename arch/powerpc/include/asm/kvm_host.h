@@ -263,11 +263,14 @@ struct revmap_entry {
 /*
  * rmap bits for KVM UV tracking of GFNs
  * 0x0000080000000000	lock bit
- * 0x0000000000000010	paged in bit
- * 0x000000000000000f	guest page frame state
+ * 0x0000010000000000	paged in bit
+ * 0x000000ffffffffff	40-bit L1 gfn
+ * 0x0000f00000000000	guest page frame state
  */
-#define KVMPPC_RMAP_UV_GPF_STATE_MASK	0xf
-#define KVMPPC_RMAP_UV_PAGED_IN_BIT	4
+#define KVMPPC_RMAP_UV_PAGED_IN_BIT	42
+#define KVMPPC_RMAP_UV_GFN_MASK		0x00fffffffffful
+#define KVMPPC_RMAP_UV_GPF_STATE_SHIFT	44
+#define KVMPPC_RMAP_UV_GPF_STATE_MASK	(0xful << KVMPPC_RMAP_UV_GPF_STATE_SHIFT)
 
 struct kvm_arch_memory_slot {
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE

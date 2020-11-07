@@ -30,6 +30,7 @@ unsigned long kvmppc_uv_handle_paging(struct kvm_vcpu *vcpu, unsigned long op,
 unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid, gpa_t n_gpa,
 				   unsigned long order);
 int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned long n_gpa);
+bool uv_in_progress(struct kvm_vcpu *vcpu);
 #else
 struct uv_worker;
 
@@ -78,6 +79,11 @@ static inline unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned
 static inline int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned long n_gpa)
 {
 	return 0;
+}
+
+static inline bool uv_in_progress(struct kvm_vcpu *vcpu)
+{
+	return false;
 }
 
 #endif /* CONFIG_PPC_UV_EMULATE */
