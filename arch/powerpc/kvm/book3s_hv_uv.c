@@ -531,6 +531,30 @@ static struct kvm_memory_slot *gfn_to_nested_memslot(struct kvm_nested_memslots 
 		       sizeof(struct kvm_memory_slot), nested_memslots_cmp);
 }
 
+static bool gfn_range_valid(struct kvm_nested_memslots *slots, gfn_t base_gfn, unsigned long npages)
+{
+	struct kvm_memory_slot *tmp;
+	gfn_t end_gfn;
+
+	if (npages <= 0)
+		return false;
+
+	end_gfn = base_gfn + npages;
+
+	kvm_for_each_memslot(tmp, slots) {
+		if (end_gfn > tmp->base_gfn + tmp->npages)
+			return false;
+
+		if (base_gfn >= tmp->base_gfn)
+			return true;
+
+		if (end_gfn >= tmp->base_gfn)
+			end_gfn = tmp->base_gfn - 1;
+	}
+
+	return false;
+}
+
 static int update_nested_slots(struct kvm_nested_guest *gp,
 			       const struct kvm_memory_slot *old,
 			       struct kvm_memory_slot *new)
