@@ -48,7 +48,103 @@ struct uv_worker {
 enum uv_gpf_state {
 	GPF_SECURE,
 	GPF_PAGEDOUT,
+	GPF_SHARED,
+	GPF_SHARED_INV,
+	GPF_SHARED_IMPLICIT,
+	GPF_SHARED_IMPLICIT_INV,
+	GPF_HV_SHARING,
+	GPF_HV_SHARED,
+	GPF_HV_SHARED_INV,
+	GPF_HV_UNSHARING,
+	GPF_HV_UNSHARING_INV,
+	GPF_HV_UNSHARED,
+	GPF_PSEUDO_SHARED,
+	GPF_PSEUDO_SHARED_INV,
 };
+
+/*
+ * We generalize the individual guest page frame states into broader
+ * categories as follows.
+ */
+#define __GPF_SECURE	(BIT(GPF_SECURE) | BIT(GPF_PAGEDOUT))
+#define __GPF_SHARED	(BIT(GPF_SHARED) | BIT(GPF_SHARED_INV))
+#define __GPF_HV_SHARED	(BIT(GPF_HV_SHARED) | BIT(GPF_HV_SHARED_INV))
+#define __GPF_SHARED_IMPLICIT	(BIT(GPF_SHARED_IMPLICIT) |	\
+				 BIT(GPF_SHARED_IMPLICIT_INV))
+#define __GPF_PSEUDO_SHARED	(BIT(GPF_PSEUDO_SHARED) |	\
+				 BIT(GPF_PSEUDO_SHARED_INV))
+
+#define __GPF_HV_UNSHARED	(BIT(GPF_HV_SHARING) |			\
+				 BIT(GPF_HV_UNSHARING) |		\
+				 BIT(GPF_HV_UNSHARED) |			\
+				 BIT(GPF_HV_UNSHARING_INV))
+
+#define __GPF_PRESENT	(BIT(GPF_SHARED) |		\
+			 BIT(GPF_SHARED_IMPLICIT) |	\
+			 BIT(GPF_HV_SHARED) |		\
+			 BIT(GPF_HV_UNSHARING) |	\
+			 BIT(GPF_PSEUDO_SHARED))
+
+#define __GPF_INVAL	(BIT(GPF_SHARED_INV) |			\
+			 BIT(GPF_SHARED_IMPLICIT_INV) |		\
+			 BIT(GPF_HV_SHARED_INV) |		\
+			 BIT(GPF_HV_UNSHARING_INV) |		\
+			 BIT(GPF_PSEUDO_SHARED_INV))
+
+#define GPF_TYPE_SECURE __GPF_SECURE
+#define GPF_TYPE_SHARED (__GPF_SHARED | __GPF_SHARED_IMPLICIT | __GPF_PSEUDO_SHARED)
+#define GPF_TYPE_HV_SHARED __GPF_HV_SHARED
+#define GPF_TYPE_TRANSIENT (__GPF_HV_SHARED | __GPF_HV_UNSHARED)
+#define GPF_TYPE_UNSHAREABLE (__GPF_SHARED_IMPLICIT | __GPF_PSEUDO_SHARED)
+#define GPF_TYPE_PRESENT __GPF_PRESENT
+#define GPF_TYPE_INVALIDATED __GPF_INVAL
+
+
+static inline bool gpf_type(enum uv_gpf_state state, unsigned long type)
+{
+	return (BIT(state) & type);
+}
+
+#ifdef DEBUG
+static const char *gpf_state_names[] = {
+	__stringify(GPF_SECURE),
+	__stringify(GPF_PAGEDOUT),
+	__stringify(GPF_SHARED),
+	__stringify(GPF_SHARED_INV),
+	__stringify(GPF_SHARED_IMPLICIT),
+	__stringify(GPF_SHARED_IMPLICIT_INV),
+	__stringify(GPF_HV_SHARING),
+	__stringify(GPF_HV_SHARED),
+	__stringify(GPF_HV_SHARED_INV),
+	__stringify(GPF_HV_UNSHARING),
+	__stringify(GPF_HV_UNSHARING_INV),
+	__stringify(GPF_HV_UNSHARED),
+	__stringify(GPF_PSEUDO_SHARED),
+	__stringify(GPF_PSEUDO_SHARED_INV),
+};
+
+#define print_if_type(x, y) do {		\
+		if(gpf_type(x, y))		\
+			pr_cont(" %s", #y);	\
+	} while (0)				\
+
+static void uv_print_gpf_state(const char* func, enum uv_gpf_state state)
+{
+	pr_debug("%s: gpf state: %s", func, gpf_state_names[state]);
+
+	print_if_type(state, GPF_TYPE_SECURE);
+	print_if_type(state, GPF_TYPE_TRANSIENT);
+	print_if_type(state, GPF_TYPE_UNSHAREABLE);
+	print_if_type(state, GPF_TYPE_SHARED);
+	print_if_type(state, GPF_TYPE_PRESENT);
+	print_if_type(state, GPF_TYPE_INVALIDATED);
+	pr_cont("\n");
+}
+#else
+static inline void uv_print_gpf_state(const char* func, enum uv_gpf_state state)
+{
+}
+#endif
 
 static bool uv_rmap_valid(unsigned long rmap)
 {
