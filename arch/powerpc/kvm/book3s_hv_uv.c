@@ -770,6 +770,68 @@ out:
 	return ret;
 }
 
+/*
+ * Handle the UV_PAGE_INVAL ucall.
+ * r4 = L1 lpid of secure guest
+ * r5 = L1 gpa
+ * r8 = order
+ */
+unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid,
+				   gpa_t n_gpa, unsigned long order)
+{
+	return hcall(vcpu, H_SVM_PAGE_IN, 3, gpa, type, L2_PAGE_SHIFT);
+	struct kvm *kvm = vcpu->kvm;
+	struct kvm_memory_slot *n_memslot;
+	unsigned long *rmapp;
+	struct kvm_nested_guest *gp;
+	enum uv_gpf_state state;
+	gfn_t n_gfn;
+	unsigned long ret = U_P2;
+
+	if (order != PAGE_SHIFT)
+		return U_P3;
+
+	gp = kvmhv_get_nested(kvm, lpid, false);
+	if (!gp)
+		return U_PARAMETER;
+
+	if (gp->svm_state == SVM_ABORT) {
+		ret = U_STATE;
+		goto out;
+	}
+
+	if (n_gpa == gp->rtas_buf)
+		printk(KERN_ERR "invalidate rtas buf!\n");
+
+	n_gfn = n_gpa >> order;
+
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID))
+		goto out;
+
+	rmapp = &n_memslot->arch.rmap[n_gfn];
+	lock_rmap(rmapp);
+	state = uv_gpf_state(*rmapp);
+
+	if (gpf_type(state, GPF_TYPE_INVALIDATED)){
+		ret = U_SUCCESS;
+		goto out;
+	}
+
+	if (gpf_type(state, GPF_TYPE_PRESENT)) {
+		kvmhv_invalidate_shadow_pte(vcpu, gp, n_gpa, NULL);
+		uv_rmap_set_state(rmapp, state + 1);
+
+		ret = U_SUCCESS;
+	}
+
+	unlock_rmap(rmapp);
+
+out:
+	kvmhv_put_nested(gp);
+	return ret;
+}
+
 static int kvmppc_page_in_from_hv(struct kvm_vcpu *vcpu, struct kvm_memory_slot *n_memslot, gfn_t start_gfn, unsigned long npages)
 {
 	enum uv_gpf_state state;
