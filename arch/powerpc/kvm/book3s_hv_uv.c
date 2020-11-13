@@ -258,21 +258,12 @@ int kvmppc_page_in_hcall(struct kvm_vcpu *vcpu, gpa_t gpa, int type)
 	return hcall(vcpu, H_SVM_PAGE_IN, 3, gpa, type, L2_PAGE_SHIFT);
 }
 
-int kvmppc_uv_fault_work_fn(struct kvm *kvm, uintptr_t thread_data)
+int kvmppc_uv_abort_work_fn(struct kvm *kvm, uintptr_t thread_data)
 {
 	struct uv_worker *worker = (struct uv_worker *)thread_data;
-	struct kvm_vcpu *vcpu = worker->vcpu;
-	unsigned long n_gpa;
-	int r;
 
-	printk(KERN_DEBUG "%s\n", __func__);
-
-	n_gpa = vcpu->arch.fault_gpa & ~0xF000000000000FFFULL;
-	r = kvmppc_page_in_hcall(vcpu, n_gpa, H_PAGE_IN_NONSHARED);
-
-	printk(KERN_DEBUG "%s ret:%d\n", __func__, r);
-
-	kvmppc_uv_worker_exit(worker, r);
+	printk(KERN_DEBUG "SVM ABORT!\n");
+	kvmppc_uv_worker_exit(worker, H_PARAMETER);
 }
 
 int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
@@ -1318,6 +1309,19 @@ int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned
 	return -1;
 }
 
+static long int kvmppc_uv_abort_exit(struct kvm_vcpu *vcpu)
+{
+	unsigned long ret;
+
+	ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_abort_work_fn, 0);
+
+	if (ret == U_TOO_HARD)
+		return RESUME_HOST;
+
+	kvmppc_set_gpr(vcpu, 3, ret);
+	return RESUME_HOST;
+}
+
 /*
  * At this point both our early hook in kvmppc_uv_page_fault and the
  * nested page fault code have already executed and the fault was
@@ -1340,7 +1344,15 @@ static long int kvmppc_uv_page_fault_exit(struct kvm_vcpu *vcpu)
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
 	struct uv_worker *worker = vcpu->arch.uv_worker;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
 	unsigned long opcode;
+
+	/*
+	 * Check the state on entry because we might be re-entering
+	 * after kvmppc_uv_abort_exit called into L1.
+	 */
+	if(gp->svm_state == SVM_ABORT)
+		goto abort;
 
 	if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL) {
 		if (worker && worker->opcode)
@@ -1348,12 +1360,14 @@ long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 		else
 			opcode = kvmppc_get_gpr(vcpu, 3);
 
-		return kvmppc_uv_do_hcall(vcpu, opcode);
+		r = kvmppc_uv_do_hcall(vcpu, opcode);
 	}
 
-	if (worker || r == RESUME_PAGE_FAULT) {
-		return kvmppc_uv_page_fault_exit(vcpu);
-	}
+	if(gp->svm_state == SVM_ABORT)
+		goto abort;
 
 	return r;
+
+abort:
+	return kvmppc_uv_abort_exit(vcpu);
 }
