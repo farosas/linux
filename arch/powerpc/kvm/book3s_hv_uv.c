@@ -1887,7 +1887,10 @@ static long int kvmppc_uv_page_fault_exit(struct kvm_vcpu *vcpu)
 	printk(KERN_DEBUG "return from page fault ret=%#lx\n", ret);
 	return RESUME_GUEST;
 }
-
+/*
+ * Functions called from here have the ability to call into the nested
+ * hypervisor using hypercalls.
+ */
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
 	struct uv_worker *worker = vcpu->arch.uv_worker;
