@@ -705,9 +705,13 @@ static void kvmhv_flush_nested(struct kvm_nested_guest *gp)
 {
 	struct kvm *kvm = gp->l1_host;
 
-	spin_lock(&kvm->mmu_lock);
-	kvmppc_free_pgtable_radix(kvm, gp->shadow_pgtable, gp->shadow_lpid);
-	spin_unlock(&kvm->mmu_lock);
+	printk(KERN_DEBUG "%s\n", __func__);
+
+	if (gp->svm_state != SVM_SECURE) {
+		spin_lock(&kvm->mmu_lock);
+		kvmppc_free_pgtable_radix(kvm, gp->shadow_pgtable, gp->shadow_lpid);
+		spin_unlock(&kvm->mmu_lock);
+	}
 	kvmhv_flush_lpid(gp->shadow_lpid);
 	kvmhv_update_ptbl_cache(gp);
 	if (gp->l1_gr_to_hr == 0)
@@ -1053,6 +1057,9 @@ static void kvmhv_emulate_tlbie_lpid(struct kvm_vcpu *vcpu,
 	switch (ric) {
 	case 0:
 		/* Invalidate TLB */
+		if (gp->svm_state == SVM_SECURE)
+			break;
+
 		spin_lock(&kvm->mmu_lock);
 		kvmppc_free_pgtable_radix(kvm, gp->shadow_pgtable,
 					  gp->shadow_lpid);
