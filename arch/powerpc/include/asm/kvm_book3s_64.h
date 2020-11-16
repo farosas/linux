@@ -34,6 +34,13 @@ struct kvm_nested_memslots {
 	short id_to_index[KVM_MEM_SLOTS_NUM];
 	struct kvm_memory_slot memslots[KVM_MEM_SLOTS_NUM];
 };
+
+struct kvm_uv_rtas {
+	gpa_t buf;
+	spinlock_t lock;
+	unsigned long *bitmap;
+	spinlock_t bitmap_lock;
+};
 #endif
 
 /*
@@ -55,7 +62,7 @@ struct kvm_nested_guest {
 	short prev_cpu[NR_CPUS];
 	u8 radix;			/* is this nested guest radix */
 #ifdef CONFIG_PPC_UV_EMULATE
-	gpa_t rtas_buf;
+	struct kvm_uv_rtas rtas;
 	enum svm_state svm_state;
 	struct mutex slots_lock;
 	struct kvm_nested_memslots *memslots; /* for L0's tracking of memslots */
