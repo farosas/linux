@@ -934,6 +934,12 @@ static int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
 					      kvmppc_get_gpr(vcpu, 7),
 					      kvmppc_get_gpr(vcpu, 8));
 		break;
+	case UV_PAGE_INVAL:
+		ret = kvmppc_uv_invalidate(vcpu,
+					  (unsigned int)kvmppc_get_gpr(vcpu, 4),
+					  (gpa_t)kvmppc_get_gpr(vcpu, 5),
+					  kvmppc_get_gpr(vcpu, 6));
+		break;
 	default:
 		return RESUME_HOST;
 	}
