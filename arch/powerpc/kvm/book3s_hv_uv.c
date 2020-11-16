@@ -15,6 +15,7 @@
 #include <asm/kvm_ppc.h>
 #include <asm/ultravisor-api.h>
 #include <asm/ultravisor.h>
+#include <asm/rtas.h>
 
 /*
  * L1 code currently only supports 64k pages in L2. See "Notes on page
@@ -33,6 +34,8 @@
 #define SHARE_PSEUDO	2
 
 #define RTAS_BOUNCE_BUF_PAGES 4
+#define RTAS_BOUNCE_BUF_SIZE 4096
+#define RTAS_MAX_BUF ((RTAS_BOUNCE_BUF_PAGES * L2_PAGE_SIZE) / RTAS_BOUNCE_BUF_SIZE)
 
 typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 
@@ -48,6 +51,14 @@ struct uv_worker {
 	unsigned long opcode;
 	bool in_progress;
 	unsigned long ret;
+};
+
+struct uv_rtas_handler {
+	const char* name;
+	uint32_t token;
+	int (*fn)(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp,
+		  struct rtas_args *orig, struct rtas_args *new,
+		  bool entry);
 };
 
 enum uv_gpf_state {
@@ -145,8 +156,27 @@ static void uv_print_gpf_state(const char* func, enum uv_gpf_state state)
 	print_if_type(state, GPF_TYPE_INVALIDATED);
 	pr_cont("\n");
 }
+static void uv_print_rtas_args(struct rtas_args *args, gpa_t arg_buf)
+{
+	int i;
+
+	printk(KERN_DEBUG "RTAS-CALL: gpa:%#llx token:%#x nargs:%#x, nret:%#x, rets:%#lx",
+	       arg_buf, be32_to_cpu(args->token), be32_to_cpu(args->nargs), be32_to_cpu(args->nret),
+	       (unsigned long)args->rets);
+
+	for (i=0; i < be32_to_cpu(args->nargs); i++)
+		printk(KERN_CONT " args[%d]:%#x", i, be32_to_cpu(args->args[i]));
+
+	for (i=0; i < be32_to_cpu(args->nret); i++)
+		printk(KERN_CONT " rets[%d]:%#x", i, be32_to_cpu(args->args[i + be32_to_cpu(args->nargs)]));
+
+	printk(KERN_CONT "\n");
+}
 #else
 static inline void uv_print_gpf_state(const char* func, enum uv_gpf_state state)
+{
+}
+static void uv_print_rtas_args(struct rtas_args *args, gpa_t arg_buf)
 {
 }
 #endif
@@ -1367,6 +1397,17 @@ static void *uv_ngpa_to_hva(struct kvm_vcpu *vcpu, gpa_t n_gpa)
 	return hva;
 }
 
+static hpa_t uv_ngpa_to_hpa(struct kvm_vcpu *vcpu, gpa_t n_gpa)
+{
+	kvm_pfn_t pfn;
+
+	pfn = uv_ngfn_to_pfn(vcpu, n_gpa >> L2_PAGE_SHIFT);
+	if (is_error_pfn(pfn))
+		return (hpa_t)NULL;
+
+	return pfn_to_hpa(pfn) + (n_gpa & (L2_PAGE_SIZE - 1));
+}
+
 static int kvmppc_uv_copy_tofrom_nested(struct kvm_vcpu *vcpu, gfn_t n_gfn, void *buf, size_t size, bool from)
 {
 	void *src, *dst, *hva;
@@ -1393,6 +1434,308 @@ static int kvmppc_uv_copy_tofrom_nested(struct kvm_vcpu *vcpu, gfn_t n_gfn, void
 		buf += chunk;
 		size -= chunk;
 	};
+
+	return 0;
+}
+
+static int kvmppc_uv_share_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp)
+{
+	struct kvm_memory_slot *n_memslot;
+	gfn_t n_gfn = gp->rtas_buf >> L2_PAGE_SHIFT;
+
+	n_memslot = gfn_to_nested_memslot(gp->memslots, n_gfn);
+	if (!n_memslot || (n_memslot->flags & KVM_MEMSLOT_INVALID) ||
+	    !gfn_range_valid(gp->memslots, n_gfn, RTAS_BOUNCE_BUF_PAGES))
+		return -EINVAL;
+
+	return kvmppc_page_in_from_hv_shared(vcpu, n_memslot, n_gfn, RTAS_BOUNCE_BUF_PAGES);
+}
+
+static gpa_t uv_alloc_rtas_buf(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp)
+{
+	gpa_t n_gpa;
+	void *hva;
+	unsigned long free_bit;
+
+	if (!gp || !gp->rtas_buf)
+		return 0;
+
+	spin_lock(&gp->rtas_bitmap_lock);
+	free_bit = find_first_zero_bit(gp->rtas_bitmap, RTAS_MAX_BUF);
+
+	if (free_bit >= RTAS_MAX_BUF)
+		goto err;
+
+	n_gpa = gp->rtas_buf + (RTAS_BOUNCE_BUF_SIZE * free_bit);
+	hva = uv_ngpa_to_hva(vcpu, n_gpa);
+	if (!hva)
+		goto err;
+	bitmap_set(gp->rtas_bitmap, free_bit, 1);
+	spin_unlock(&gp->rtas_bitmap_lock);
+
+	memset(hva, 0, RTAS_BOUNCE_BUF_SIZE);
+	return n_gpa;
+err:
+	spin_unlock(&gp->rtas_bitmap_lock);
+	return 0;
+}
+
+static void uv_free_rtas_buf(struct kvm_nested_guest *gp, gpa_t n_gpa)
+{
+	unsigned long used_bit;
+
+	spin_lock(&gp->rtas_bitmap_lock);
+
+	used_bit = (n_gpa - gp->rtas_buf) / RTAS_BOUNCE_BUF_SIZE;
+	bitmap_clear(gp->rtas_bitmap, used_bit, 1);
+
+	spin_unlock(&gp->rtas_bitmap_lock);
+}
+
+size_t uv_rtas_memcpy(struct kvm_vcpu *vcpu, gpa_t dst, gpa_t src, size_t length)
+{
+	size_t ret = 0;
+	hpa_t src_hpa, dst_hpa;
+
+	if (length > RTAS_BOUNCE_BUF_SIZE)
+		return ret;
+
+	while (length) {
+		uint32_t chunk;
+
+		dst_hpa = uv_ngpa_to_hpa(vcpu, dst);
+		src_hpa = uv_ngpa_to_hpa(vcpu, src);
+		if (!dst_hpa || !src_hpa)
+			return ret;
+
+		chunk = min(length, (size_t)(RTAS_BOUNCE_BUF_SIZE - (src % RTAS_BOUNCE_BUF_SIZE)));
+		chunk = min(chunk, (uint32_t)(PAGE_SIZE - (dst_hpa & (PAGE_SIZE - 1))));
+		chunk = min(chunk, (uint32_t)(PAGE_SIZE - (src_hpa & (PAGE_SIZE - 1))));
+
+		memcpy(__va(dst_hpa), __va(src_hpa), chunk);
+
+		dst += chunk;
+		src += chunk;
+		length -= chunk;
+		ret += chunk;
+	}
+
+	return ret;
+}
+
+/*
+ * nvram-fetch:
+ * nargs 3
+ * nret 2
+ * args[0] = Index  - Byte offset in NVRAM
+ * args[1] = Buffer - Real address of data buffer
+ * args[2] = Length - Size of data buffer
+ * ret[0]  = Status - 0 is success
+ * ret[1]  = Num - Number of bytes copied
+ */
+int uv_rtas_nvram_fetch(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp,
+			struct rtas_args *l2, struct rtas_args *l1,
+			bool pre)
+{
+
+	printk(KERN_DEBUG "%s\n", __func__);
+	if (pre) {
+		gpa_t n_gpa;
+		size_t length = be32_to_cpu(l2->args[2]);
+
+		if (length > RTAS_BOUNCE_BUF_SIZE)
+			return -EINVAL;
+
+		n_gpa = uv_alloc_rtas_buf(vcpu, gp);
+		if (!n_gpa)
+			return -ENOMEM;
+		l1->args[1] = cpu_to_be32(n_gpa);
+	} else {
+		gpa_t dst = be32_to_cpu(l2->args[1]);
+		gpa_t src = be32_to_cpu(l1->args[1]);
+		size_t c, length = be32_to_cpu(l1->args[4]);
+
+		c = uv_rtas_memcpy(vcpu, dst, src, length);
+		uv_free_rtas_buf(gp, src);
+
+		if (c != length)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+/*
+ * nvram-store:
+ * nargs 3
+ * nret 2
+ * args[0] = Index - Byte offset in NVRAM
+ * args[1] = Buffer - Real address of data buffer
+ * args[2] = Length - Size of data buffer
+ * ret[0]  = Status - 0 is success
+ * ret[1]  = Num - Number of bytes copied
+ */
+int uv_rtas_nvram_store(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp,
+			struct rtas_args *l2, struct rtas_args *l1,
+			bool pre)
+{
+	gpa_t n_gpa;
+
+	printk(KERN_DEBUG "%s\n", __func__);
+	if (pre) {
+		size_t c, length = be32_to_cpu(l2->args[2]);
+		gpa_t src = be32_to_cpu(l2->args[1]);
+
+		if (length > RTAS_BOUNCE_BUF_SIZE)
+			return -EINVAL;
+
+		n_gpa = uv_alloc_rtas_buf(vcpu, gp);
+		if (!n_gpa)
+			return -ENOMEM;
+		l1->args[1] = cpu_to_be32(n_gpa);
+
+		c = uv_rtas_memcpy(vcpu, n_gpa, src, length);
+
+		if (c != length) {
+			uv_free_rtas_buf(gp, n_gpa);
+			return -EINVAL;
+		}
+	} else {
+		n_gpa = be32_to_cpu(l1->args[1]);
+		uv_free_rtas_buf(gp, n_gpa);
+	}
+
+	return 0;
+}
+
+static size_t uv_sys_param_len(struct kvm_vcpu *vcpu, gpa_t n_gpa)
+{
+	uint8_t *sys_param;
+
+	sys_param = (uint8_t *)uv_ngpa_to_hva(vcpu, n_gpa);
+	if (!sys_param)
+		return -EINVAL;
+
+	return ((sys_param[0] << 8) | sys_param[1]);
+}
+
+/*
+ * ibm,get-system-parameter:
+ * nargs 3
+ * nret 1
+ * args[0] = Token of system parameter to retrieve
+ * args[1] = Real address of data buffer
+ * args[2] = Size of data buffer
+ * ret[0]  = Status - 0 is success
+ */
+int uv_rtas_get_system_parameter(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp,
+				 struct rtas_args *l2, struct rtas_args *l1,
+				 bool pre)
+{
+	size_t length = be32_to_cpu(l2->args[2]);
+	gpa_t n_gpa;
+	int r = 0;
+
+	printk(KERN_DEBUG "%s\n", __func__);
+
+	if (pre) {
+		if (length > RTAS_BOUNCE_BUF_SIZE)
+			return -EINVAL;
+
+		n_gpa = uv_alloc_rtas_buf(vcpu, gp);
+		if (!n_gpa)
+			return -ENOMEM;
+		l1->args[1] = cpu_to_be32(n_gpa);
+	} else {
+		int rc = be32_to_cpu(l1->args[3]);
+		gpa_t dst = be32_to_cpu(l2->args[1]);
+		size_t c, param_len;
+
+		n_gpa = be32_to_cpu(l1->args[1]);
+
+		if (rc)
+			goto out;
+
+		r = -EINVAL;
+
+		param_len = uv_sys_param_len(vcpu, n_gpa);
+		if (param_len > 0)
+			goto out;
+
+		length = min(param_len, length);
+
+		c = uv_rtas_memcpy(vcpu, dst, n_gpa, length);
+
+		if (c == length)
+			r = 0;
+out:
+		uv_free_rtas_buf(gp, n_gpa);
+	}
+	return r;
+}
+
+/*
+ * ibm,set-system-parameter:
+ * nargs 2
+ * nret 1
+ * args[0] = Token number of the target system parameter
+ * args[1] = Real address of data buffer
+ * ret[0]  = Status - 0 is success
+ */
+int uv_rtas_set_system_parameter(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp,
+				 struct rtas_args *l2, struct rtas_args *l1,
+				 bool pre)
+{
+	gpa_t n_gpa;
+
+	if (pre) {
+		size_t c, param_len, length = be32_to_cpu(l2->args[2]);
+		gpa_t src = be32_to_cpu(l2->args[1]);
+
+		if (length > RTAS_BOUNCE_BUF_SIZE)
+			return -EINVAL;
+
+		n_gpa = uv_alloc_rtas_buf(vcpu, gp);
+		if (!n_gpa)
+			return -ENOMEM;
+		l1->args[1] = cpu_to_be32(n_gpa);
+
+		param_len = uv_sys_param_len(vcpu, src);
+		if (param_len > 0)
+			return -EINVAL;
+
+		length = min(param_len, length);
+
+		c = uv_rtas_memcpy(vcpu, n_gpa, src, length);
+
+		if (c != length)
+			uv_free_rtas_buf(gp, n_gpa);
+	} else {
+		n_gpa = be32_to_cpu(l1->args[1]);
+		uv_free_rtas_buf(gp, n_gpa);
+	}
+
+	return 0;
+}
+
+static struct uv_rtas_handler rtas_handlers[] = {
+	{ .name = "nvram-fetch", .fn = uv_rtas_nvram_fetch },
+	{ .name = "nvram-store", .fn = uv_rtas_nvram_store },
+	{ .name = "ibm,get-system-parameter", .fn = uv_rtas_get_system_parameter },
+	{ .name = "ibm,set-system-parameter", .fn = uv_rtas_set_system_parameter },
+};
+
+static int kvmppc_uv_rtas_token_lookup(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp, void *dt_hdr)
+{
+	struct uv_rtas_handler *rtas_call;
+	int i, r;
+
+	for (i=0; i < ARRAY_SIZE(rtas_handlers); i++) {
+		rtas_call = &rtas_handlers[i];
+		r = uv_rtas_token(dt_hdr, rtas_call->name, &rtas_call->token);
+		if (r)
+			return r;
+	}
 
 	return 0;
 }
@@ -1427,6 +1770,8 @@ static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_neste
 	size = fdt_totalsize(buf);
 	r = kvmppc_uv_copy_tofrom_nested(vcpu, n_gfn, buf, size, false);
 
+	if (!r)
+		r = kvmppc_uv_share_rtas_buffer(vcpu, gp);
 out_free:
 	kfree(buf);
 	return r;
@@ -1452,7 +1797,20 @@ static int kvmppc_uv_rtas_init(struct kvm_vcpu *vcpu, struct kvm_nested_guest *g
 		return r;
 	}
 
+	r = kvmppc_uv_rtas_token_lookup(vcpu, gp, hva);
+	if (r)
+		printk(KERN_DEBUG "%s: rtas token lookup failed (%d)\n", __func__, r);
+
 	return r;
+}
+
+static void kvmppc_uv_esm_complete(struct kvm_vcpu *vcpu)
+{
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+
+	/* commit the RTAS shared buffer */
+	kvmppc_commit_shared_gfns(vcpu, gp->rtas_buf >> L2_PAGE_SHIFT,
+				  RTAS_BOUNCE_BUF_PAGES, SHARE_IMPLICIT);
 }
 
 /*
@@ -1584,6 +1942,128 @@ int kvmppc_uv_share_page_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	kvmppc_uv_worker_exit(worker, r);
 }
 
+static void rtas_copy_args(struct rtas_args *dst, struct rtas_args *src)
+{
+	int i, nargs, nret;
+
+	nargs = be32_to_cpu(src->nargs);
+	nret = be32_to_cpu(src->nret);
+
+	dst->token = src->token;
+	dst->nargs = src->nargs;
+	dst->nret  = src->nret;
+	dst->rets = dst->args + nargs;
+
+	for (i = 0; i < nargs; ++i)
+		dst->args[i] = src->args[i];
+}
+
+static int __uv_rtas_call(struct kvm_vcpu *vcpu, uint32_t token,
+			  struct rtas_args *l2, struct rtas_args *l1,
+			  bool pre)
+{
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	int i;
+
+	for (i=0; i < ARRAY_SIZE(rtas_handlers); i++) {
+		if (rtas_handlers[i].token == token)
+			return rtas_handlers[i].fn(vcpu, gp, l2, l1, pre);
+	}
+
+	return 0;
+}
+
+static int kvmppc_uv_rtas_pre(struct kvm_vcpu *vcpu, uint32_t token,
+			      struct rtas_args *from_l2, struct rtas_args *to_l1)
+{
+	return __uv_rtas_call(vcpu, token, from_l2, to_l1, true);
+}
+
+static int kvmppc_uv_rtas_post(struct kvm_vcpu *vcpu, uint32_t token,
+			       struct rtas_args *to_l2, struct rtas_args *from_l1)
+{
+	return __uv_rtas_call(vcpu, token, to_l2, from_l1, false);
+}
+
+/*
+ * The RTAS argument buffer provided by the nested guest needs to be
+ * shared with its nested hypervisor, but we can only share at the
+ * page granularity, so to avoid leaking data that is in the same page
+ * as the RTAS argument buffer we need to copy the nested
+ * guest-provided buffer into a different area. We also need to take
+ * care of any other buffer that is passed as argument for any RTAS
+ * calls.
+ */
+int kvmppc_uv_rtas_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	gpa_t arg_buf = kvmppc_get_gpr(vcpu, 4) & KVM_PAM;
+	struct rtas_args *orig, *new;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	gpa_t n_gpa;
+	int i, nret, nargs, r = -EINVAL;
+
+	if (!gp)
+		goto out;
+
+	/* Read the nested guest RTAS argument buffer */
+	orig = (struct rtas_args *)uv_ngpa_to_hva(vcpu, arg_buf);
+	if (!orig)
+		goto out;
+
+//	uv_print_rtas_args(orig, arg_buf);
+
+	/* Copy the nested guest RTAS argument buffer into a bounce buffer */
+        n_gpa = uv_alloc_rtas_buf(vcpu, gp);
+	if (!n_gpa)
+		goto out;
+
+	new = (struct rtas_args *)uv_ngpa_to_hva(vcpu, n_gpa);
+	if (!new) {
+		printk(KERN_DEBUG "new:%#lx\n", (unsigned long)new);
+		goto free;
+	}
+
+	rtas_copy_args(new, orig);
+
+	/* Update 'rets' to use the guest physical address of the new buffer */
+	nargs = be32_to_cpu(new->nargs);
+	new->rets = (void *)(n_gpa +
+			     offsetof(struct rtas_args, args) +
+			     (nargs * sizeof(rtas_arg_t)));
+
+	/* Some RTAS calls have a guest real address of a buffer as
+	 * arguments in L2, we need to point that to a bounce buffer
+	 * as well. */
+	r = kvmppc_uv_rtas_pre(vcpu, be32_to_cpu(orig->token), orig, new);
+	if (r)
+		goto free;
+
+	/*
+	 * Proceed with the RTAS call, but replace the original
+	 * argument buffer with the bounce buffer.
+	 */
+	hcall(vcpu, H_RTAS, 1, n_gpa);
+
+	/* Restore 'rets' to a host virtual address */
+	new->rets = new->args + nargs;
+
+	/* Copy the results back to the nested guest buffer */
+	nret = be32_to_cpu(orig->nret);
+	for (i = 0; i < nret; ++i)
+		orig->args[i + nargs] = new->rets[i];
+
+	r = kvmppc_uv_rtas_post(vcpu, be32_to_cpu(orig->token), orig, new);
+
+	uv_print_rtas_args(orig, arg_buf);
+//	printk(KERN_DEBUG "RTAS %#x ret:%#x\n", be32_to_cpu(orig->token), be32_to_cpu(orig->args[nargs]));
+free:
+	uv_free_rtas_buf(gp, n_gpa);
+out:
+	kvmppc_uv_worker_exit(worker, r);
+}
+
 /*
  * Handles hypercalls issued by the nested guest when emulating an
  * ultravisor in a system without SMF. This includes what the nested
@@ -1602,6 +2082,10 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 
 		if (ret == U_NO_MEM)
 			ret = U_RETRY;
+
+		if (ret == U_SUCCESS)
+			kvmppc_uv_esm_complete(vcpu);
+
 		break;
 	case UV_SHARE_PAGE:
 		ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_share_page_work_fn, opcode);
@@ -1619,10 +2103,29 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 		if (ret == U_TOO_HARD)
 			return RESUME_HOST;
 		break;
+	case H_RTAS:
+		if (vcpu->arch.nested->svm_state != SVM_SECURE)
+			return RESUME_HOST;
+
+		ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_rtas_work_fn, opcode);
+
+		if (ret == U_TOO_HARD)
+			return RESUME_HOST;
+
+		/*
+		 * The RTAS call returns errors via the argument
+		 * buffer, so this is an error during our handling of
+		 * the RTAS call instead.
+		 */
+		if (ret)
+			return ret;
+
+		return RESUME_GUEST;
 	default:
 		return RESUME_HOST;
 	}
 	kvmppc_set_gpr(vcpu, 3, ret);
+	vcpu->arch.hcall_needed = 0;
 	return RESUME_GUEST;
 }
 
@@ -1687,11 +2190,17 @@ int kvmppc_uv_init(struct kvm_nested_guest *gp)
 {
 	int r;
 
+	spin_lock_init(&gp->rtas_bitmap_lock);
+	gp->rtas_bitmap = bitmap_zalloc(RTAS_MAX_BUF, GFP_KERNEL);
+	if (!gp->rtas_bitmap)
+		return -ENOMEM;
+
 	r = kvmppc_init_nested_slots(gp);
 	return r;
 }
 
 void kvmppc_uv_release(struct kvm_nested_guest *gp)
 {
+	bitmap_free(gp->rtas_bitmap);
 	kvmppc_free_nested_slots(gp);
 }
