@@ -36,6 +36,7 @@
 #define RTAS_BOUNCE_BUF_PAGES 4
 #define RTAS_BOUNCE_BUF_SIZE 4096
 #define RTAS_MAX_BUF ((RTAS_BOUNCE_BUF_PAGES * L2_PAGE_SIZE) / RTAS_BOUNCE_BUF_SIZE)
+#define RTAS_IBM_OS_TERM	0x201F
 
 typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 
@@ -49,6 +50,7 @@ struct uv_worker {
 
 	unsigned long opcode;
 	bool in_progress;
+	bool shutdown;
 	unsigned long ret;
 };
 
@@ -276,6 +278,8 @@ static struct uv_worker *__uv_worker_init(struct kvm_vcpu *vcpu, kvm_vm_thread_f
 	worker->vcpu = vcpu;
 	worker->opcode = opcode;
 
+	worker->shutdown = false;
+
 	r = kvm_vm_create_worker_thread(vcpu->kvm, fn, (uintptr_t)worker, "kvm_uv_worker",
 					&worker->thread);
 	if (r) {
@@ -286,18 +290,21 @@ static struct uv_worker *__uv_worker_init(struct kvm_vcpu *vcpu, kvm_vm_thread_f
 	return worker;
 }
 
-static void kvmppc_uv_worker_wait(struct uv_worker *worker)
+static int kvmppc_uv_worker_wait(struct uv_worker *worker)
 {
 	int r;
 
 	worker->ret = U_TOO_HARD;
 	complete(&worker->work_step_done);
 	r = wait_for_completion_killable(&worker->hcall_done);
-	if (r == -ERESTARTSYS) {
-		printk(KERN_DEBUG "worker killed\n");
+
+	if (r == -ERESTARTSYS || worker->shutdown) {
+		vcpu_debug(worker->vcpu, "worker killed\n");
+		return -EINTR;
 	}
 
 	reinit_completion(&worker->hcall_done);
+	return 0;
 }
 
 static void __noreturn kvmppc_uv_worker_exit(struct uv_worker *worker, unsigned long ret)
@@ -305,6 +312,35 @@ static void __noreturn kvmppc_uv_worker_exit(struct uv_worker *worker, unsigned 
 	worker->ret = ret;
 	worker->in_progress = false;
 	complete_and_exit(&worker->work_step_done, 0);
+}
+
+static void uv_worker_cleanup(struct kvm_vcpu *vcpu)
+{
+	struct uv_worker *worker;
+
+	worker = vcpu->arch.uv_worker;
+
+	if (worker) {
+		worker->shutdown = true;
+
+		vcpu_debug(vcpu, "%s waiting for thread:%d \n", __func__, completion_done(&worker->work_step_done));
+		vcpu_debug(vcpu, "%s waiting for main:%d \n", __func__, completion_done(&worker->hcall_done));
+
+		/*
+		 * During shutdown, there won't be a call to
+		 * H_ENTER_NESTED to give us the opportunity to finish
+		 * the work, so mark it complete here. The thread_fn
+		 * will receive -EINTR from kvmppc_uv_worker_wait()
+		 * and do it's own cleanup.
+		 */
+		if (!completion_done(&worker->hcall_done))
+			complete(&worker->hcall_done);
+
+		/* Wait for the thread to exit and release the worker */
+		wait_for_completion(&worker->work_step_done);
+		kfree(worker);
+		vcpu->arch.uv_worker = NULL;
+	}
 }
 
 static void __uv_worker_step(struct kvm_vcpu *vcpu, struct uv_worker *worker)
@@ -320,8 +356,9 @@ static void __uv_worker_step(struct kvm_vcpu *vcpu, struct uv_worker *worker)
 	}
 
 	r = wait_for_completion_killable(&worker->work_step_done);
-	if (r == -ERESTARTSYS) {
-		printk(KERN_DEBUG "main thread killed\n");
+
+	if (r == -ERESTARTSYS || worker->shutdown) {
+		vcpu_debug(vcpu, "main thread killed\n");
 		worker->ret = -EINTR;
 		worker->in_progress = false;
 	}
@@ -386,7 +423,10 @@ static int kvmppc_uv_hcall(struct kvm_vcpu *vcpu, unsigned long hcall, int nargs
 	vcpu->arch.trap = BOOK3S_INTERRUPT_SYSCALL;
 
 	/* wait for L1 */
-	kvmppc_uv_worker_wait(worker);
+	ret = kvmppc_uv_worker_wait(worker);
+
+	if (ret == -EINTR)
+		return ret;
 
 	ret = kvmppc_get_gpr(vcpu, 3);
 
@@ -736,6 +776,37 @@ unsigned long kvmppc_uv_unregister_memslot(struct kvm_vcpu *vcpu, unsigned int l
 	return ret;
 }
 
+unsigned long kvmppc_uv_terminate_vm(struct kvm_vcpu *vcpu, unsigned int lpid)
+{
+	struct kvm *kvm = vcpu->kvm; /* these are from L1 */
+	struct kvm_nested_guest *gp;
+	int i;
+
+	vcpu_debug(vcpu, "%s lpid=%d\n", __func__, lpid);
+
+	gp = kvmhv_get_nested(vcpu->kvm, lpid, false);
+	if (!gp)
+		return U_PARAMETER;
+
+	if (gp->svm_state != SVM_SECURE) {
+		kvmhv_put_nested(gp);
+		return U_PARAMETER;
+	}
+
+	/*
+	 * Release the worker thread resources. Other cleanup is done
+	 * in kvmppc_uv_release which is called later during the
+	 * nested release path.
+	 */
+	kvm_for_each_vcpu(i, vcpu, kvm) {
+		uv_worker_cleanup(vcpu);
+	}
+
+	gp->svm_state = 0;
+	kvmhv_put_nested(gp);
+	return U_SUCCESS;
+}
+
 static bool uv_is_rtas_buf(struct kvm_nested_guest *gp, gpa_t n_gpa)
 {
 	return (n_gpa >= gp->rtas.buf &&
@@ -814,6 +885,9 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 	gfn_t gfn, n_gfn;
 	int level, shift;
 	long int r;
+
+	if (gp->svm_state == SVM_ABORT)
+		return U_STATE;
 
 	gfn = gpa >> PAGE_SHIFT;
 	n_gfn = n_gpa >> page_shift;
@@ -2074,8 +2148,6 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 out:
 	kvmppc_uv_worker_exit(worker, ret);
 abort:
-	vcpu->arch.nested->svm_state = SVM_ABORT;
-
 	/* H_SVM_INIT_ABORT always returns H_PARAMETER. */
 	kvmppc_uv_hcall(vcpu, H_SVM_INIT_ABORT, 0);
 	kvmppc_uv_worker_exit(worker, H_PARAMETER);
@@ -2254,7 +2326,12 @@ int kvmppc_uv_rtas_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	 * Proceed with the RTAS call, but replace the original
 	 * argument buffer with the bounce buffer.
 	 */
-	kvmppc_uv_hcall(vcpu, H_RTAS, 1, n_gpa);
+	r = kvmppc_uv_hcall(vcpu, H_RTAS, 1, n_gpa);
+	if (r == -EINTR) {
+		printk(KERN_DEBUG "%s shutting down during:%#x\n", __func__, be32_to_cpu(orig->token));
+		r = 0;
+		goto free;
+	}
 
 	spin_lock(&gp->rtas.lock);
 
@@ -2276,6 +2353,62 @@ unlock:
 	spin_unlock(&gp->rtas.lock);
 out:
 	kvmppc_uv_worker_exit(worker, r);
+}
+
+int kvmppc_uv_abort_work_fn(struct kvm *kvm, uintptr_t thread_data)
+{
+	struct uv_worker *worker = (struct uv_worker *)thread_data;
+	struct kvm_vcpu *vcpu = worker->vcpu;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
+	struct rtas_args *osterm_args;
+	gpa_t rtas_buf_gpa, str_buf_gpa;
+	const char *abort_msg = "Aborting";
+	void *str_buf;
+	u32 nargs = 1, nret = 1;
+
+	printk(KERN_DEBUG "%s SVM ABORT!\n", __func__);
+
+	spin_lock(&gp->rtas.lock);
+	kvmppc_uv_pin_rtas_buffer(vcpu, gp);
+
+        rtas_buf_gpa = uv_alloc_rtas_buf(vcpu, gp);
+        str_buf_gpa = uv_alloc_rtas_buf(vcpu, gp);
+
+	if (!rtas_buf_gpa || !str_buf_gpa)
+		goto free;
+
+	osterm_args = (struct rtas_args *)uv_ngpa_to_hva(vcpu, rtas_buf_gpa);
+	str_buf = uv_ngpa_to_hva(vcpu, str_buf_gpa);
+
+	if (!osterm_args || !str_buf)
+		goto free;
+
+	memcpy(str_buf, abort_msg, strlen(abort_msg) + 1);
+
+	printk(KERN_DEBUG "%s str_buf:%s\n", __func__, (char *)str_buf);
+
+	osterm_args->token = cpu_to_be32(RTAS_IBM_OS_TERM);
+	osterm_args->nargs = cpu_to_be32(nargs);
+	osterm_args->nret = cpu_to_be32(nret);
+
+	osterm_args->args[0] = cpu_to_be32(str_buf_gpa);
+	osterm_args->rets = __rtas_update_rets(rtas_buf_gpa, nargs);
+
+	printk(KERN_DEBUG "%s os-term call:\n", __func__);
+	uv_print_rtas_args(osterm_args, rtas_buf_gpa);
+
+	spin_unlock(&gp->rtas.lock);
+	kvmppc_uv_hcall(vcpu, H_RTAS, 1, rtas_buf_gpa);
+	spin_lock(&gp->rtas.lock);
+	printk(KERN_DEBUG "%s os-term call return\n", __func__);
+	if (osterm_args->args[nargs])
+		vcpu_debug(vcpu, "failed to abort!\n");
+free:
+	uv_free_rtas_buf(gp, rtas_buf_gpa);
+	uv_free_rtas_buf(gp, str_buf_gpa);
+	spin_unlock(&gp->rtas.lock);
+
+	kvmppc_uv_worker_exit(worker, H_PARAMETER);
 }
 
 /*
@@ -2367,6 +2500,19 @@ int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned
 	return -1;
 }
 
+static long int kvmppc_uv_abort_exit(struct kvm_vcpu *vcpu)
+{
+	unsigned long ret;
+
+	ret = kvmppc_uv_do_work(vcpu, kvmppc_uv_abort_work_fn, 0);
+
+	if (ret == U_TOO_HARD)
+		return RESUME_HOST;
+
+	kvmppc_set_gpr(vcpu, 3, ret);
+	return RESUME_HOST;
+}
+
 /*
  * Operations that need to call into the nested hypervisor should be
  * dispatched from here using kvmppc_uv_do_work. After L1 handles the
@@ -2380,7 +2526,15 @@ int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 {
 	struct uv_worker *worker = vcpu->arch.uv_worker;
+	struct kvm_nested_guest *gp = vcpu->arch.nested;
 	unsigned long opcode;
+
+	/*
+	 * Check the state on entry because we might be re-entering
+	 * after kvmppc_uv_abort_exit called into L1.
+	 */
+	if(gp->svm_state == SVM_ABORT)
+		goto abort;
 
 	if (vcpu->run->exit_reason == KVM_EXIT_PAPR_HCALL) {
 		if (worker && worker->opcode)
@@ -2388,10 +2542,16 @@ long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 		else
 			opcode = kvmppc_get_gpr(vcpu, 3);
 
-		return kvmppc_uv_do_hcall(vcpu, opcode);
+		r = kvmppc_uv_do_hcall(vcpu, opcode);
 	}
 
+	if(gp->svm_state == SVM_ABORT)
+		goto abort;
+
 	return r;
+
+abort:
+	return kvmppc_uv_abort_exit(vcpu);
 }
 
 int kvmppc_uv_init(struct kvm_nested_guest *gp)

@@ -940,6 +940,9 @@ static int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
 					  (gpa_t)kvmppc_get_gpr(vcpu, 5),
 					  kvmppc_get_gpr(vcpu, 6));
 		break;
+	case UV_SVM_TERMINATE:
+		ret = kvmppc_uv_terminate_vm(vcpu, (unsigned int)kvmppc_get_gpr(vcpu, 4));
+		break;
 	default:
 		return RESUME_HOST;
 	}
