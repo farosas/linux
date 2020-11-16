@@ -244,3 +244,22 @@ out_free:
 	return r;
 }
 EXPORT_SYMBOL_GPL(uv_fdt_reserve_mem);
+
+int uv_rtas_token(void *fdt, const char *name, u32 *token)
+{
+	const struct fdt_property *prop;
+	int offset;
+
+	offset = fdt_path_offset(fdt, "/rtas");
+	if (offset < 0)
+		return -ENOENT;
+
+	prop = fdt_get_property(fdt, offset, name, NULL);
+	if (!prop)
+		return -ENOENT;
+
+	*token = uv_fdt_get_cell(prop, 0);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(uv_rtas_token);
