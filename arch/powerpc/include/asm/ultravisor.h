@@ -84,6 +84,7 @@ static inline int uv_svm_terminate(u64 lpid)
 
 #ifdef CONFIG_PPC_UV_EMULATE
 int uv_fdt_reserve_mem(unsigned long *hpa_fdt, unsigned int npages, unsigned int page_size, u64 *rsv_addr);
+int uv_rtas_token(void *fdt, const char *name, u32 *token);
 #endif
 
 #endif	/* _ASM_POWERPC_ULTRAVISOR_H */
