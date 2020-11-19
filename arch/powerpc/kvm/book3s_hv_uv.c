@@ -1964,6 +1964,7 @@ static void rtas_copy_args(struct rtas_args *dst, struct rtas_args *src)
 
 	for (i = 0; i < nargs; ++i)
 		dst->args[i] = src->args[i];
+}
 
 static int __uv_rtas_call(struct kvm_vcpu *vcpu, uint32_t token,
 			  struct rtas_args *l2, struct rtas_args *l1,
