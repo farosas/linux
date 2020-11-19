@@ -33,7 +33,7 @@
 #define SHARE_IMPLICIT	1
 #define SHARE_PSEUDO	2
 
-#define RTAS_BOUNCE_BUFFER_PAGES 4
+#define RTAS_BOUNCE_BUF_PAGES 4
 
 typedef int (*kvm_vm_thread_fn_t)(struct kvm *kvm, uintptr_t data);
 
@@ -1406,22 +1406,13 @@ static int kvmppc_uv_copy_tofrom_nested(struct kvm_vcpu *vcpu, gfn_t n_gfn, void
 	return 0;
 }
 
-static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp, gpa_t dt_hdr)
+static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp,
+					 gfn_t n_gfn, void *hva)
 {
 	int r;
 	void *buf;
 	size_t size;
-	gfn_t n_gfn;
-	unsigned long *hva;
-
-	if (!gp)
-		return -EINVAL;
-
-	printk(KERN_DEBUG "%s device-tree header ngpa=%#llx\n", __func__, dt_hdr);
-
-	hva = uv_ngpa_to_hva(vcpu, dt_hdr);
-	if (!hva)
-		return -EINVAL;
+	int r;
 
 	/*
 	 * Copy the device-tree out of the L2 guest memory so that we
@@ -1433,12 +1424,11 @@ static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_neste
 	if (!buf)
 		return -ENOMEM;
 
-	n_gfn = dt_hdr >> L2_PAGE_SHIFT;
 	r = kvmppc_uv_copy_tofrom_nested(vcpu, n_gfn, buf, size, true);
 	if (r)
 		goto out_free;
 
-	r = uv_fdt_reserve_mem(buf, RTAS_BOUNCE_BUFFER_PAGES, L2_PAGE_SIZE, &gp->rtas_buf);
+	r = uv_fdt_reserve_mem(buf, RTAS_BOUNCE_BUF_PAGES, L2_PAGE_SIZE, &gp->rtas_buf);
 	if (r)
 		goto out_free;
 
@@ -1449,6 +1439,29 @@ static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_neste
 
 out_free:
 	kfree(buf);
+	return r;
+}
+
+static int kvmppc_uv_rtas_init(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp, gpa_t dt_hdr)
+{
+	void *hva;
+	int r;
+
+	if (!gp)
+		return -EINVAL;
+
+	printk(KERN_DEBUG "%s device-tree header ngpa=%#llx\n", __func__, dt_hdr);
+
+	hva = uv_ngpa_to_hva(vcpu, dt_hdr);
+	if (!hva)
+		return -EINVAL;
+
+	r = kvmppc_uv_reserve_rtas_buffer(vcpu, vcpu->arch.nested, dt_hdr >> L2_PAGE_SHIFT, hva);
+	if (r) {
+		printk(KERN_DEBUG "%s: rtas buffer reservation failed (%d)\n", __func__, r);
+		return r;
+	}
+
 	return r;
 }
 
@@ -1492,9 +1505,9 @@ int kvmppc_uv_esm_work_fn(struct kvm *kvm, uintptr_t thread_data)
 		goto abort;
 	}
 
-	r = kvmppc_uv_reserve_rtas_buffer(vcpu, vcpu->arch.nested, fdt);
+	r = kvmppc_uv_rtas_init(vcpu, vcpu->arch.nested, fdt);
 	if (r) {
-		printk(KERN_DEBUG "%s: rtas buffer reservation failed (%d)\n", __func__, r);
+		printk(KERN_DEBUG "%s: rtas init failed (%d)\n", __func__, r);
 		goto abort;
 	}
 
