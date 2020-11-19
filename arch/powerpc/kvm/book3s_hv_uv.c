@@ -807,6 +807,9 @@ static unsigned long kvmppc_uv_page_out(struct kvm_vcpu *vcpu,
 	n_gfn = n_gpa >> page_shift;
 	state = uv_gpf_state(*rmapp);
 
+	if (state == GPF_HV_UNSHARED)
+		return U_RETRY;
+
 	if (!uv_gfn_paged_in(*rmapp))
 		return U_SUCCESS;
 
@@ -1181,19 +1184,17 @@ abort:
 	return;
 }
 
-static void kvmppc_commit_shared_gfns(struct kvm_vcpu *vcpu, int type)
+static void kvmppc_commit_shared_gfns(struct kvm_vcpu *vcpu, gfn_t start_gfn,
+				      unsigned long npages, int type)
 {
 	struct kvm_memory_slot *memslot, *n_memslot;
 	struct kvm *kvm = vcpu->kvm;
-	unsigned long npages, mmu_seq, *rmapp, *l1_rmapp;
+	unsigned long mmu_seq, *rmapp, *l1_rmapp;
 	enum uv_gpf_state state;
 	struct kvm_nested_guest *gp = vcpu->arch.nested;
-	gfn_t start_gfn, n_gfn, gfn;
+	gfn_t n_gfn, gfn;
 	pte_t pte, *ptep;
 	int level, page_shift, r;
-
-	start_gfn = kvmppc_get_gpr(vcpu, 4);
-	npages = kvmppc_get_gpr(vcpu, 5);
 
 	if (!gp || !npages)
 		goto abort;
@@ -1513,6 +1514,14 @@ abort:
 	kvmppc_uv_worker_exit(worker, H_PARAMETER);
 }
 
+static void kvmppc_uv_share_page_complete(struct kvm_vcpu *vcpu)
+{
+	gfn_t start_gfn = kvmppc_get_gpr(vcpu, 4);
+	unsigned long npages = kvmppc_get_gpr(vcpu, 5);
+
+	kvmppc_commit_shared_gfns(vcpu, start_gfn, npages, SHARE_EXPLICIT);
+}
+
 int kvmppc_uv_unshare_page_work_fn(struct kvm *kvm, uintptr_t thread_data)
 {
 	struct uv_worker *worker = (struct uv_worker *)thread_data;
@@ -1683,7 +1692,7 @@ static long int kvmppc_uv_do_hcall(struct kvm_vcpu *vcpu, unsigned long opcode)
 			return RESUME_HOST;
 
 		if (ret == U_SUCCESS)
-			kvmppc_commit_shared_gfns(vcpu, SHARE_EXPLICIT);
+			kvmppc_uv_share_page_complete(vcpu);
 
 		break;
 	case UV_UNSHARE_PAGE:
