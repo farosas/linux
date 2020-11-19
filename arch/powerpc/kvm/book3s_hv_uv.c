@@ -1751,7 +1751,6 @@ static int kvmppc_uv_rtas_token_lookup(struct kvm_vcpu *vcpu, struct kvm_nested_
 static int kvmppc_uv_reserve_rtas_buffer(struct kvm_vcpu *vcpu, struct kvm_nested_guest *gp,
 					 gfn_t n_gfn, void *hva)
 {
-	int r;
 	void *buf;
 	size_t size;
 	int r;
