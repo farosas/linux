@@ -56,6 +56,8 @@ struct kvm_nested_guest {
 	u8 radix;			/* is this nested guest radix */
 #ifdef CONFIG_PPC_UV_EMULATE
 	gpa_t rtas_buf;
+	unsigned long *rtas_bitmap;
+	spinlock_t rtas_bitmap_lock;
 	enum svm_state svm_state;
 	struct mutex slots_lock;
 	struct kvm_nested_memslots *memslots; /* for L0's tracking of memslots */
