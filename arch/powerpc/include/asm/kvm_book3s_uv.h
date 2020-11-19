@@ -15,8 +15,8 @@ enum svm_state {
 };
 
 long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r);
-int kvmppc_init_nested_slots(struct kvm_nested_guest *gp);
-void kvmppc_free_nested_slots(struct kvm_nested_guest *gp);
+int kvmppc_uv_init(struct kvm_nested_guest *gp);
+void kvmppc_uv_release(struct kvm_nested_guest *gp);
 unsigned long kvmppc_uv_register_memslot(struct kvm_vcpu *vcpu,
 					 unsigned int lpid,
 					 gpa_t gpa,
@@ -39,12 +39,12 @@ static inline long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 	return 0;
 }
 
-static inline int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
+static inline int kvmppc_uv_init(struct kvm_nested_guest *gp)
 {
 	return 0;
 }
 
-static inline void kvmppc_free_nested_slots(struct kvm_nested_guest *gp)
+static inline void kvmppc_uv_release(struct kvm_nested_guest *gp)
 {
 }
 

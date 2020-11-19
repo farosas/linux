@@ -358,7 +358,7 @@ int kvmppc_uv_abort_work_fn(struct kvm *kvm, uintptr_t thread_data)
 	kvmppc_uv_worker_exit(worker, H_PARAMETER);
 }
 
-int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
+static int kvmppc_init_nested_slots(struct kvm_nested_guest *gp)
 {
 	struct kvm_nested_memslots *slots;
 	int i;
@@ -407,7 +407,7 @@ static void kvmppc_free_memslot_rmap(struct kvm_nested_memslots *slots, short sl
 	slot->arch.rmap = NULL;
 }
 
-void kvmppc_free_nested_slots(struct kvm_nested_guest *gp)
+static void kvmppc_free_nested_slots(struct kvm_nested_guest *gp)
 {
 	struct kvm_memory_slot *memslot;
 	struct kvm_nested_memslots *slots;
@@ -1800,4 +1800,17 @@ long int kvmppc_uv_handle_exit(struct kvm_vcpu *vcpu, long int r)
 
 abort:
 	return kvmppc_uv_abort_exit(vcpu);
+}
+
+int kvmppc_uv_init(struct kvm_nested_guest *gp)
+{
+	int r;
+
+	r = kvmppc_init_nested_slots(gp);
+	return r;
+}
+
+void kvmppc_uv_release(struct kvm_nested_guest *gp)
+{
+	kvmppc_free_nested_slots(gp);
 }
