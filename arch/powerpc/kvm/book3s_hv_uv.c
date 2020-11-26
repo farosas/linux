@@ -717,6 +717,8 @@ static int uv_handle_shared_page(struct kvm_vcpu *vcpu, struct kvm_nested_guest 
 		page_shift = kvmppc_radix_level_to_shift(level);
 	}
 
+	gfn = ((gfn << PAGE_SHIFT) & ~((1UL << page_shift) - 1)) >> PAGE_SHIFT;
+
 	level = kvmppc_radix_shift_to_level(page_shift);
 	rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
 	r = kvmhv_insert_shadow_pte(kvm, gp, pte, n_gfn << L2_PAGE_SHIFT, level, rmapp, mmu_seq);
@@ -739,7 +741,7 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 	unsigned long mmu_seq, *l1_rmapp;
 	enum uv_gpf_state state;
 	gfn_t gfn, n_gfn;
-	int level;
+	int level, shift;
 	long int r;
 
 	gfn = gpa >> PAGE_SHIFT;
@@ -787,18 +789,21 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 
 	pte = __pte(0);
 	spin_lock(&kvm->mmu_lock);
-	ptep = find_kvm_secondary_pte(kvm, gpa, NULL);
+	ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
+	if (!shift)
+		shift = PAGE_SHIFT;
 	if (ptep)
 		pte = *ptep;
 	spin_unlock(&kvm->mmu_lock);
 
 	if (!pte_present(pte)) {
 		r = kvmppc_book3s_instantiate_page(vcpu, gpa, memslot, true,
-						   false, &pte, NULL);
+						   false, &pte, &level);
 		if (r == -EAGAIN)
 			return U_BUSY;
 		if (r)
 			return U_P2;
+		shift = kvmppc_radix_level_to_shift(level);
 	}
 
 	/* Unmap gra -> hra so that l1 cannot directly access l2's memory */
@@ -816,6 +821,8 @@ static unsigned long kvmppc_uv_page_in(struct kvm_vcpu *vcpu,
 	/* Insert new n_gra -> hra pte in the shadow page table for l2 */
 
 	level = kvmppc_radix_shift_to_level(page_shift);
+
+	gfn = (gpa & ~((1UL << shift) - 1)) >> PAGE_SHIFT;
 	l1_rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
 
 	r = kvmhv_insert_shadow_pte(kvm, gp, pte, n_gpa, level, l1_rmapp, mmu_seq);
