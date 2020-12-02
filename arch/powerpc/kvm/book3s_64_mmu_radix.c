@@ -400,6 +400,8 @@ void kvmppc_unmap_pte(struct kvm *kvm, pte_t *pte, unsigned long gpa,
 	unsigned long page_size = PAGE_SIZE;
 	unsigned long hpa;
 
+//	printk(KERN_DEBUG "%s %#lx\n", __func__, gpa);
+
 	old = kvmppc_radix_update_pte(kvm, pte, ~0UL, 0, gpa, shift);
 	kvmppc_radix_tlbie_page(kvm, gpa, shift, lpid);
 
@@ -1025,6 +1027,9 @@ int kvm_age_radix(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
 		return ref;
 
+	if (gpa == 0x2ffb0000)
+		printk(KERN_DEBUG "%s\n", __func__);
+
 	ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
 	if (ptep && pte_present(*ptep) && pte_young(*ptep)) {
 		old = kvmppc_radix_update_pte(kvm, ptep, _PAGE_ACCESSED, 0,
@@ -1071,6 +1076,9 @@ static int kvm_radix_test_clear_dirty(struct kvm *kvm,
 
 	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
 		return ret;
+
+	if (gpa == 0x2ffb0000)
+		printk(KERN_DEBUG "%s\n", __func__);
 
 	/*
 	 * For performance reasons we don't hold kvm->mmu_lock while walking the

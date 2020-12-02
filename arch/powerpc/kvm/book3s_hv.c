@@ -940,6 +940,10 @@ static int kvmppc_pseries_do_ucall(struct kvm_vcpu *vcpu)
 					  (gpa_t)kvmppc_get_gpr(vcpu, 5),
 					  kvmppc_get_gpr(vcpu, 6));
 		break;
+	case UV_SVM_TERMINATE:
+		printk(KERN_DEBUG "UV_SVM_TERMINATE\n");
+		ret = kvmppc_uv_terminate_vm(vcpu, (unsigned int)kvmppc_get_gpr(vcpu, 4));
+		break;
 	default:
 		return RESUME_HOST;
 	}
@@ -4419,6 +4423,9 @@ static int kvmppc_vcpu_run_hv(struct kvm_vcpu *vcpu)
 			r = kvmppc_book3s_hv_page_fault(vcpu,
 				vcpu->arch.fault_dar, vcpu->arch.fault_dsisr);
 			srcu_read_unlock(&kvm->srcu, srcu_idx);
+			if (r < 0)
+				printk("unhandled L1 fault in L0!\n");
+
 		} else if (r == RESUME_PASSTHROUGH) {
 			if (WARN_ON(xics_on_xive()))
 				r = H_SUCCESS;

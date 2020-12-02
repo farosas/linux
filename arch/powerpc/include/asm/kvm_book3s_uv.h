@@ -31,6 +31,7 @@ unsigned long kvmppc_uv_invalidate(struct kvm_vcpu *vcpu, unsigned int lpid, gpa
 				   unsigned long order);
 bool uv_in_progress(struct kvm_vcpu *vcpu);
 int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned long ea, unsigned long n_gpa);
+unsigned long kvmppc_uv_terminate_vm(struct kvm_vcpu *vcpu, unsigned int lpid);
 #else
 struct uv_worker;
 
@@ -85,5 +86,9 @@ static inline int kvmppc_uv_page_fault(struct kvm_nested_guest *gp, unsigned lon
 	return 0;
 }
 
+unsigned long kvmppc_uv_terminate_vm(struct kvm_vcpu *vcpu, unsigned int lpid)
+{
+	return U_FUNCTION;
+}
 #endif /* CONFIG_PPC_UV_EMULATE */
 #endif /* __ASM_KVM_BOOK3S_UV_H__ */

@@ -21,7 +21,7 @@
 #include <asm/xive-regs.h>
 
 #include "book3s_xive.h"
-
+#undef DEBUG
 /* XXX */
 #include <asm/udbg.h>
 //#define DBG(fmt...) udbg_printf(fmt)

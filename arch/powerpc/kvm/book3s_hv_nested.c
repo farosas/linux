@@ -625,6 +625,7 @@ static void kvmhv_release_nested(struct kvm_nested_guest *gp)
 	struct kvm *kvm = gp->l1_host;
 
 	if (gp->shadow_pgtable) {
+		printk(KERN_DEBUG "%s\n", __func__);
 		/*
 		 * No vcpu is using this struct and no call to
 		 * kvmhv_get_nested can find this struct,
@@ -705,13 +706,14 @@ static void kvmhv_flush_nested(struct kvm_nested_guest *gp)
 {
 	struct kvm *kvm = gp->l1_host;
 
-	printk(KERN_DEBUG "%s\n", __func__);
-
 	if (gp->svm_state != SVM_SECURE) {
+		printk(KERN_DEBUG "%s svm state:%d\n", __func__, gp->svm_state);
+
 		spin_lock(&kvm->mmu_lock);
 		kvmppc_free_pgtable_radix(kvm, gp->shadow_pgtable, gp->shadow_lpid);
 		spin_unlock(&kvm->mmu_lock);
 	}
+
 	kvmhv_flush_lpid(gp->shadow_lpid);
 	kvmhv_update_ptbl_cache(gp);
 	if (gp->l1_gr_to_hr == 0)
@@ -962,6 +964,9 @@ bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
 	pte_t *ptep;
 	int shift;
 
+//	if (gpa == 0x2ffb0000)
+//		printk(KERN_DEBUG "%s %#lx\n", __func__, gpa);
+
 	spin_lock(&kvm->mmu_lock);
 	ptep = find_kvm_nested_guest_pte(kvm, gp->l1_lpid, gpa, &shift);
 	if (!shift)
@@ -1037,6 +1042,8 @@ static int kvmhv_emulate_tlbie_tlb_addr(struct kvm_vcpu *vcpu, int lpid,
 
 	/* There may be more than one host page backing this single guest pte */
 	do {
+		if (addr == 0x2ffb0000)
+			printk(KERN_DEBUG "%s %#lx\n\n", __func__, addr);
 		kvmhv_invalidate_shadow_pte(vcpu, gp, addr, &shadow_shift);
 
 		npages -= 1UL << (shadow_shift - PAGE_SHIFT);
@@ -1060,11 +1067,14 @@ static void kvmhv_emulate_tlbie_lpid(struct kvm_vcpu *vcpu,
 		if (gp->svm_state == SVM_SECURE)
 			break;
 
+		printk(KERN_DEBUG "%s svm state:%d\n", __func__, gp->svm_state);
+
 		spin_lock(&kvm->mmu_lock);
 		kvmppc_free_pgtable_radix(kvm, gp->shadow_pgtable,
 					  gp->shadow_lpid);
 		kvmhv_flush_lpid(gp->shadow_lpid);
 		spin_unlock(&kvm->mmu_lock);
+
 		break;
 	case 1:
 		/*
@@ -1168,7 +1178,7 @@ long kvmhv_do_nested_tlbie(struct kvm_vcpu *vcpu)
 	int ret;
 
 	ret = kvmhv_emulate_priv_tlbie(vcpu, kvmppc_get_gpr(vcpu, 4),
-			kvmppc_get_gpr(vcpu, 5), kvmppc_get_gpr(vcpu, 6));
+				       kvmppc_get_gpr(vcpu, 5), kvmppc_get_gpr(vcpu, 6));
 	if (ret)
 		return H_PARAMETER;
 	return H_SUCCESS;
@@ -1455,12 +1465,15 @@ static long int __kvmhv_nested_page_fault(struct kvm_vcpu *vcpu,
 	rmapp = &memslot->arch.rmap[gfn - memslot->base_gfn];
 	ret = kvmhv_insert_shadow_pte(kvm, gp, pte, n_gpa, level, rmapp, mmu_seq);
 
+	if (gp->svm_state == SVM_SECURE)
+		printk(KERN_DEBUG "%s insert shadow pte ngpa:%#lx\n", __func__, n_gpa);
 	if (ret == -EAGAIN)
 		ret = RESUME_GUEST;	/* Let the guest try again */
 
 	return ret;
 
  inval:
+	vcpu_debug(vcpu, "%s: invalidated shadow pte for n_gpa:%#lx\n", __func__, n_gpa);
 	kvmhv_invalidate_shadow_pte(vcpu, gp, n_gpa, NULL);
 	return RESUME_GUEST;
 }

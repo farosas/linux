@@ -2,7 +2,7 @@
 /*
  * Copyright 2017 Benjamin Herrenschmidt, IBM Corporation.
  */
-
+#undef DEBUG
 #define pr_fmt(fmt) "xive-kvm: " fmt
 
 #include <linux/kernel.h>
