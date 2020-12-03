@@ -762,7 +762,10 @@ static int kvmppc_svm_page_in(struct vm_area_struct *vma,
 		goto out_finalize;
 	}
 
-	if (pagein) {
+	*mig.dst = migrate_pfn(page_to_pfn(dpage)) | MIGRATE_PFN_LOCKED;
+	migrate_vma_pages(&mig);
+
+	if ((*mig.src & MIGRATE_PFN_MIGRATE) && pagein) {
 		pfn = *mig.src >> MIGRATE_PFN_SHIFT;
 		spage = migrate_pfn_to_page(*mig.src);
 		if (spage) {
@@ -773,8 +776,6 @@ static int kvmppc_svm_page_in(struct vm_area_struct *vma,
 		}
 	}
 
-	*mig.dst = migrate_pfn(page_to_pfn(dpage)) | MIGRATE_PFN_LOCKED;
-	migrate_vma_pages(&mig);
 out_finalize:
 	migrate_vma_finalize(&mig);
 	return ret;
