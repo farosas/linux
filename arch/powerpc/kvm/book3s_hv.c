@@ -1418,11 +1418,17 @@ static int kvmppc_handle_exit_hv(struct kvm_vcpu *vcpu,
 			vcpu->arch.last_inst = kvmppc_need_byteswap(vcpu) ?
 				swab32(vcpu->arch.emul_inst) :
 				vcpu->arch.emul_inst;
+
+		printk(KERN_DEBUG "e40 at %#lx srr0=%#llx srr1=%#llx emul=%#x last=%#x\n",
+		       kvmppc_get_pc(vcpu), kvmppc_get_srr0(vcpu), kvmppc_get_srr1(vcpu),
+		       vcpu->arch.emul_inst, vcpu->arch.last_inst);
+
 		if (vcpu->guest_debug & KVM_GUESTDBG_USE_SW_BP) {
 			r = kvmppc_emulate_debug_inst(vcpu);
 		} else {
 			kvmppc_core_queue_program(vcpu, SRR1_PROGILL);
-			r = RESUME_GUEST;
+//			r = RESUME_GUEST;
+			r = RESUME_HOST;
 		}
 		break;
 	/*
