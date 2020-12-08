@@ -235,6 +235,11 @@ int kvmppc_rtas_hcall(struct kvm_vcpu *vcpu)
 	if (rc)
 		goto fail;
 
+/*
+	if (vcpu->kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
+		printk(KERN_DEBUG "%s: L1 rtas call gpa=%#llx, token=%#x nargs=%#x, nret=%#x, rets=%#lx\n", __func__,
+		       args_phys, args.token, args.nargs, args.nret, (unsigned long)&(args.args[args.nargs]));
+*/
 	/*
 	 * args->rets is a pointer into args->args. Now that we've
 	 * copied args we need to fix it up to point into our copy,

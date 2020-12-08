@@ -1072,37 +1072,48 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
 			ret = kvmhv_copy_tofrom_guest_nested(vcpu);
 		break;
 	case H_PAGE_INIT:
+		printk(KERN_DEBUG "H_SVM_PAGE_INIT\n");
 		ret = kvmppc_h_page_init(vcpu, kvmppc_get_gpr(vcpu, 4),
 					 kvmppc_get_gpr(vcpu, 5),
 					 kvmppc_get_gpr(vcpu, 6));
+		printk(KERN_DEBUG "ret=%#lx\n", ret);
 		break;
 	case H_SVM_PAGE_IN:
+//		printk(KERN_DEBUG "H_SVM_PAGE_IN\n");
 		ret = H_UNSUPPORTED;
 		if (kvmppc_get_srr1(vcpu) & MSR_S)
 			ret = kvmppc_h_svm_page_in(vcpu->kvm,
 						   kvmppc_get_gpr(vcpu, 4),
 						   kvmppc_get_gpr(vcpu, 5),
 						   kvmppc_get_gpr(vcpu, 6));
+//		printk(KERN_DEBUG "ret=%#lx\n", ret);
 		break;
 	case H_SVM_PAGE_OUT:
+//		printk(KERN_DEBUG "H_SVM_PAGE_OUT\n");
 		ret = H_UNSUPPORTED;
 		if (kvmppc_get_srr1(vcpu) & MSR_S)
 			ret = kvmppc_h_svm_page_out(vcpu->kvm,
 						    kvmppc_get_gpr(vcpu, 4),
 						    kvmppc_get_gpr(vcpu, 5),
 						    kvmppc_get_gpr(vcpu, 6));
+//		printk(KERN_DEBUG "ret=%#lx\n", ret);
 		break;
 	case H_SVM_INIT_START:
+		printk(KERN_DEBUG "H_SVM_INIT_START\n");
 		ret = H_UNSUPPORTED;
 		if (kvmppc_get_srr1(vcpu) & MSR_S)
 			ret = kvmppc_h_svm_init_start(vcpu->kvm);
+		printk(KERN_DEBUG "ret=%#lx\n", ret);
 		break;
 	case H_SVM_INIT_DONE:
+		printk(KERN_DEBUG "H_SVM_INIT_DONE\n");
 		ret = H_UNSUPPORTED;
 		if (kvmppc_get_srr1(vcpu) & MSR_S)
 			ret = kvmppc_h_svm_init_done(vcpu->kvm);
+		printk(KERN_DEBUG "ret=%#lx\n", ret);
 		break;
 	case H_SVM_INIT_ABORT:
+		printk(KERN_DEBUG "H_SVM_INIT_ABORT\n");
 		/*
 		 * Even if that call is made by the Ultravisor, the SSR1 value
 		 * is the guest context one, with the secure bit clear as it has
@@ -1111,6 +1122,7 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
 		 * kvmppc_h_svm_init_abort().
 		 */
 		ret = kvmppc_h_svm_init_abort(vcpu->kvm);
+		printk(KERN_DEBUG "ret=%#lx\n", ret);
 		break;
 
 	default:
@@ -4360,6 +4372,8 @@ static int kvmppc_vcpu_run_hv(struct kvm_vcpu *vcpu)
 			r = kvmppc_book3s_hv_page_fault(vcpu,
 				vcpu->arch.fault_dar, vcpu->arch.fault_dsisr);
 			srcu_read_unlock(&kvm->srcu, srcu_idx);
+			if (r < 0)
+				printk("unhandled L2 fault in L1!\n");
 		} else if (r == RESUME_PASSTHROUGH) {
 			if (WARN_ON(xics_on_xive()))
 				r = H_SUCCESS;
@@ -5002,6 +5016,9 @@ static void kvmppc_core_destroy_vm_hv(struct kvm *kvm)
 {
 	debugfs_remove_recursive(kvm->arch.debugfs_dir);
 
+	printk(KERN_DEBUG "%s\n", __func__);
+//	dump_stack();
+
 	if (!kvm->arch.threads_indep)
 		kvm_hv_vm_deactivated();
 
@@ -5502,8 +5519,12 @@ static int kvmhv_svm_off(struct kvm *kvm)
 	int ret = 0;
 	int i;
 
+	printk(KERN_DEBUG "%s\n", __func__);
+
 	if (!(kvm->arch.secure_guest & KVMPPC_SECURE_INIT_START))
 		return ret;
+
+//	dump_stack();
 
 	mutex_lock(&kvm->arch.mmu_setup_lock);
 	mmu_was_ready = kvm->arch.mmu_ready;
@@ -5562,6 +5583,8 @@ static int kvmhv_svm_off(struct kvm *kvm)
 	kvm->arch.mmu_ready = mmu_was_ready;
 out:
 	mutex_unlock(&kvm->arch.mmu_setup_lock);
+
+	printk(KERN_DEBUG "%s ret:%d\n", __func__, ret);
 	return ret;
 }
 

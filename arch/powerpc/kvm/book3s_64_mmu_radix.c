@@ -921,14 +921,17 @@ int kvmppc_book3s_radix_page_fault(struct kvm_vcpu *vcpu,
 	bool writing = !!(dsisr & DSISR_ISSTORE);
 	bool kvm_ro = false;
 
+//	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
+//		printk(KERN_DEBUG "L2 page fault reached L1 KVM");
+
 	/* Check for unusual errors */
 	if (dsisr & DSISR_UNSUPP_MMU) {
-		pr_err("KVM: Got unsupported MMU fault\n");
+		printk(KERN_DEBUG "KVM: Got unsupported MMU fault\n");
 		return -EFAULT;
 	}
 	if (dsisr & DSISR_BADACCESS) {
 		/* Reflect to the guest as DSI */
-		pr_err("KVM: Got radix HV page fault with DSISR=%lx\n", dsisr);
+		printk(KERN_DEBUG "KVM: Got radix HV page fault with DSISR=%lx\n", dsisr);
 		kvmppc_core_queue_data_storage(vcpu, ea, dsisr);
 		return RESUME_GUEST;
 	}
@@ -940,8 +943,10 @@ int kvmppc_book3s_radix_page_fault(struct kvm_vcpu *vcpu,
 	if (!(dsisr & DSISR_PRTABLE_FAULT))
 		gpa |= ea & 0xfff;
 
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
+	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE) {
+//		printk(KERN_CONT " gpa:%#lx", gpa);
 		return kvmppc_send_page_to_uv(kvm, gfn);
+	}
 
 	/* Get the corresponding memslot */
 	memslot = gfn_to_memslot(kvm, gfn);
@@ -955,8 +960,10 @@ int kvmppc_book3s_radix_page_fault(struct kvm_vcpu *vcpu,
 			 * unusual error - reflect it to the guest as DSI.
 			 */
 			kvmppc_core_queue_data_storage(vcpu, ea, dsisr);
+			printk(KERN_DEBUG "bad address RESUME_GUEST\n");
 			return RESUME_GUEST;
 		}
+//		printk(KERN_DEBUG "emulate mmio\n");
 		return kvmppc_hv_emulate_mmio(vcpu, gpa, ea, writing);
 	}
 
@@ -965,6 +972,7 @@ int kvmppc_book3s_radix_page_fault(struct kvm_vcpu *vcpu,
 			/* give the guest a DSI */
 			kvmppc_core_queue_data_storage(vcpu, ea, DSISR_ISSTORE |
 						       DSISR_PROTFAULT);
+			printk(KERN_DEBUG "read only, inject DSI and RESUME_GUEST\n");
 			return RESUME_GUEST;
 		}
 		kvm_ro = true;
@@ -979,8 +987,10 @@ int kvmppc_book3s_radix_page_fault(struct kvm_vcpu *vcpu,
 		spin_unlock(&kvm->mmu_lock);
 
 		if (!(dsisr & (DSISR_BAD_FAULT_64S | DSISR_NOHPTE |
-			       DSISR_PROTFAULT | DSISR_SET_RC)))
+			       DSISR_PROTFAULT | DSISR_SET_RC))) {
+			printk(KERN_DEBUG "RESUME_GUEST set rc\n");
 			return RESUME_GUEST;
+		}
 	}
 
 	/* Try to insert a pte */
@@ -989,6 +999,7 @@ int kvmppc_book3s_radix_page_fault(struct kvm_vcpu *vcpu,
 
 	if (ret == 0 || ret == -EAGAIN)
 		ret = RESUME_GUEST;
+//	printk(KERN_DEBUG "return %s\n\n", (ret == RESUME_HOST ? "RESUME_HOST" : "RESUME_GUEST ok"));
 	return ret;
 }
 
@@ -999,6 +1010,11 @@ int kvm_unmap_radix(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	pte_t *ptep;
 	unsigned long gpa = gfn << PAGE_SHIFT;
 	unsigned int shift;
+
+	if (gfn == 0x2ffb) {
+		printk(KERN_DEBUG "%s %#lx\n\n", __func__, gfn);
+//		dump_stack();
+	}
 
 	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE) {
 		uv_page_inval(kvm->arch.lpid, gpa, PAGE_SHIFT);

@@ -235,6 +235,8 @@ struct kvmppc_uvmem_page_pvt {
 	bool remove_gfn;
 };
 
+static void kvmppc_uvmem_page_free(struct page *page);
+
 bool kvmppc_uvmem_available(void)
 {
 	/*
@@ -251,6 +253,7 @@ int kvmppc_uvmem_slot_init(struct kvm *kvm, const struct kvm_memory_slot *slot)
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
+	printk(KERN_DEBUG "p=%#lx\n", (unsigned long)p);
 	p->pfns = vzalloc(array_size(slot->npages, sizeof(*p->pfns)));
 	if (!p->pfns) {
 		kfree(p);
@@ -469,7 +472,7 @@ unsigned long kvmppc_h_svm_init_start(struct kvm *kvm)
 	int srcu_idx;
 
 	kvm->arch.secure_guest = KVMPPC_SECURE_INIT_START;
-
+	kvm_debug("h_svm_init_start secure=%d\n", kvm->arch.secure_guest);
 	if (!kvmppc_uvmem_bitmap)
 		return H_UNSUPPORTED;
 
@@ -480,6 +483,7 @@ unsigned long kvmppc_h_svm_init_start(struct kvm *kvm)
 	/* NAK the transition to secure if not enabled */
 	if (!kvm->arch.svm_enabled)
 		return H_AUTHORITY;
+	kvm_debug("svm enabled\n");
 
 	srcu_idx = srcu_read_lock(&kvm->srcu);
 
@@ -529,6 +533,8 @@ static int __kvmppc_svm_page_out(struct vm_area_struct *vma,
 	mig.dst = &dst_pfn;
 	mig.pgmap_owner = &kvmppc_uvmem_pgmap;
 	mig.flags = MIGRATE_VMA_SELECT_DEVICE_PRIVATE;
+
+//	printk(KERN_DEBUG "svm_page_out start=%#lx gpa=%#lx\n", start, gpa);
 
 	/* The requested page is already paged-out, nothing to do */
 	if (!kvmppc_gfn_is_uvmem_pfn(gpa >> page_shift, kvm, NULL))
@@ -674,6 +680,8 @@ unsigned long kvmppc_h_svm_init_abort(struct kvm *kvm)
 	int srcu_idx;
 	struct kvm_memory_slot *memslot;
 
+	printk(KERN_DEBUG "%s\n", __func__);
+
 	/*
 	 * Expect to be called only after INIT_START and before INIT_DONE.
 	 * If INIT_DONE was completed, use normal VM termination sequence.
@@ -773,16 +781,20 @@ static int kvmppc_svm_page_in(struct vm_area_struct *vma,
 	mig.flags = MIGRATE_VMA_SELECT_SYSTEM;
 
 	ret = migrate_vma_setup(&mig);
-	if (ret)
+	if (ret) {
+		printk(KERN_DEBUG "%s migration failed ret:%d\n", __func__, ret);
 		return ret;
+	}
 
 	if (!(*mig.src & MIGRATE_PFN_MIGRATE)) {
+		printk(KERN_DEBUG "%s pfn not migrated\n", __func__);
 		ret = -1;
 		goto out_finalize;
 	}
 
 	dpage = kvmppc_uvmem_get_page(gpa, kvm);
 	if (!dpage) {
+		printk(KERN_DEBUG "%s no page\n", __func__);
 		ret = -1;
 		goto out_finalize;
 	}
@@ -990,30 +1002,39 @@ unsigned long kvmppc_h_svm_page_in(struct kvm *kvm, unsigned long gpa,
 	if (flags & ~H_PAGE_IN_SHARED)
 		return H_P2;
 
-	if (flags & H_PAGE_IN_SHARED)
+	if (flags & H_PAGE_IN_SHARED) {
 		return kvmppc_share_page(kvm, gpa, page_shift);
+	}
 
 	ret = H_PARAMETER;
 	srcu_idx = srcu_read_lock(&kvm->srcu);
 	mmap_read_lock(kvm->mm);
 
 	start = gfn_to_hva(kvm, gfn);
-	if (kvm_is_error_hva(start))
+	if (kvm_is_error_hva(start)) {
+		printk(KERN_DEBUG "%s kvm_is_error_hva\n", __func__);
 		goto out;
+	}
 
 	mutex_lock(&kvm->arch.uvmem_lock);
 	/* Fail the page-in request of an already paged-in page */
-	if (kvmppc_gfn_is_uvmem_pfn(gfn, kvm, NULL))
+	if (kvmppc_gfn_is_uvmem_pfn(gfn, kvm, NULL)) {
+		printk(KERN_DEBUG "%s already paged in\n", __func__);
 		goto out_unlock;
+	}
 
 	end = start + (1UL << page_shift);
 	vma = find_vma_intersection(kvm->mm, start, end);
-	if (!vma || vma->vm_start > start || vma->vm_end < end)
+	if (!vma || vma->vm_start > start || vma->vm_end < end) {
+		printk(KERN_DEBUG "%s invalid vma\n", __func__);
 		goto out_unlock;
+	}
 
 	if (kvmppc_svm_page_in(vma, start, end, gpa, kvm, page_shift,
-				true))
+			       true)){
+		printk(KERN_DEBUG "%s page in failed\n", __func__);
 		goto out_unlock;
+	}
 
 	ret = H_SUCCESS;
 
@@ -1125,15 +1146,21 @@ int kvmppc_send_page_to_uv(struct kvm *kvm, unsigned long gfn)
 	int ret = U_SUCCESS;
 
 	pfn = gfn_to_pfn(kvm, gfn);
-	if (is_error_noslot_pfn(pfn))
+	if (is_error_noslot_pfn(pfn)) {
+		printk(KERN_DEBUG "no slot pfn=%#lx gfn=%#lx\n", pfn, gfn);
 		return -EFAULT;
+	}
 
 	mutex_lock(&kvm->arch.uvmem_lock);
-	if (kvmppc_gfn_is_uvmem_pfn(gfn, kvm, NULL))
+	if (kvmppc_gfn_is_uvmem_pfn(gfn, kvm, NULL)) {
+		printk(KERN_DEBUG "already paged pfn=%#lx gfn=%#lx\n", pfn, gfn);
+		dump_stack();
 		goto out;
-
+	}
+//	printk(KERN_DEBUG "send to uv pfn=%#lx gfn=%#lx\n", pfn, gfn);
 	ret = uv_page_in(kvm->arch.lpid, pfn << PAGE_SHIFT, gfn << PAGE_SHIFT,
 			 0, PAGE_SHIFT);
+//	printk(KERN_DEBUG "send to uv ret: %d\n", ret);
 out:
 	kvm_release_pfn_clean(pfn);
 	mutex_unlock(&kvm->arch.uvmem_lock);

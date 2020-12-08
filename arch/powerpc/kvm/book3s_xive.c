@@ -30,7 +30,7 @@
 
 #include "book3s_xive.h"
 
-
+#undef DEBUG
 /*
  * Virtual mode variants of the hcalls for use on radix/radix
  * with AIL. They require the VCPU's VP to be "pushed"

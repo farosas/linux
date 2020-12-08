@@ -230,6 +230,7 @@ void mmu_partition_table_set_entry(unsigned int lpid, unsigned long dw0,
 {
 	unsigned long old = be64_to_cpu(partition_tb[lpid].patb0);
 
+	dump_stack();
 	/*
 	 * When ultravisor is enabled, the partition table is stored in secure
 	 * memory and can only be accessed doing an ultravisor call. However, we
