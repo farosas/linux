@@ -1162,7 +1162,13 @@ int kvmppc_uvmem_init(void)
 		 * Let normal guests run on such PEF-disabled platform.
 		 */
 		pr_info("KVMPPC-UVMEM: No support for secure guests\n");
+#ifdef DEBUG
+		pr_debug("KVMPPC-UVMEM: (DEBUG) Allocating 16GB of private memory anyway\n");
+		size=0x200000000;
+#else
 		goto out;
+#endif
+
 	}
 
 	res = request_free_mem_region(&iomem_resource, size, "kvmppc_uvmem");
