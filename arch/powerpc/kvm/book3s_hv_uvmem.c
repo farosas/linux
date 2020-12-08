@@ -226,6 +226,7 @@ struct kvmppc_uvmem_slot {
 	unsigned long nr_pfns;
 	unsigned long base_pfn;
 	unsigned long *pfns;
+	unsigned long **pages; // DEBUG
 };
 struct kvmppc_uvmem_page_pvt {
 	struct kvm *kvm;
@@ -255,6 +256,13 @@ int kvmppc_uvmem_slot_init(struct kvm *kvm, const struct kvm_memory_slot *slot)
 		kfree(p);
 		return -ENOMEM;
 	}
+// DEBUG
+	p->pages = vzalloc(array_size(slot->npages, sizeof(unsigned long *)));
+	if (!p->pages) {
+		kfree(p);
+		return -ENOMEM;
+	}
+//
 	p->nr_pfns = slot->npages;
 	p->base_pfn = slot->base_gfn;
 
@@ -554,10 +562,27 @@ static int __kvmppc_svm_page_out(struct vm_area_struct *vma,
 	 *   the page to essentially unmap the device page. In this
 	 *   case we skip page-out.
 	 */
-	if (!pvt->skip_page_out)
+	if (!pvt->skip_page_out) {
 		ret = uv_page_out(kvm->arch.lpid, pfn << page_shift,
 				  gpa, 0, page_shift);
+// DEBUG
+	{
+	struct kvmppc_uvmem_slot *p;
+	unsigned long *page;
+	list_for_each_entry(p, &kvm->arch.uvmem_pfns, list) {
+		page = p->pages[gpa >> page_shift];
 
+		if (page) {
+//			printk(KERN_DEBUG "copied gfn=%#lx page to %#lx page=%#lx p=%#lx\n", (gpa >> page_shift), (unsigned long)__va(pfn << page_shift), (unsigned long)page, (unsigned long)p);
+			memcpy(__va(pfn << page_shift), page, PAGE_SIZE);
+			kfree(page);
+			p->pages[gpa >> page_shift] = NULL;
+		}
+		break;
+	}
+	}
+//
+	}
 	if (ret == U_SUCCESS)
 		*mig.dst = migrate_pfn(pfn) | MIGRATE_PFN_LOCKED;
 	else {
@@ -769,10 +794,33 @@ static int kvmppc_svm_page_in(struct vm_area_struct *vma,
 		pfn = *mig.src >> MIGRATE_PFN_SHIFT;
 		spage = migrate_pfn_to_page(*mig.src);
 		if (spage) {
-			ret = uv_page_in(kvm->arch.lpid, pfn << page_shift,
-					gpa, 0, page_shift);
-			if (ret)
+//			ret = uv_page_in(kvm->arch.lpid, pfn << page_shift,
+//					gpa, 0, page_shift);
+// DEBUG
+	{
+	struct kvmppc_uvmem_slot *p;
+	unsigned long *mem;
+
+	mem = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!mem) {
+		printk(KERN_DEBUG "%s debug allocation failed\n", __func__);
+		goto out_finalize;
+	}
+
+	list_for_each_entry(p, &kvm->arch.uvmem_pfns, list) {
+		memcpy(mem, __va(pfn << page_shift), PAGE_SIZE);
+//		printk(KERN_DEBUG "copied gfn=%#lx page from %#lx mem=%#lx p=%#lx\n", (gpa >> page_shift), (unsigned long)__va(pfn << page_shift), (unsigned long)mem, (unsigned long)p);
+		p->pages[gpa >> page_shift] = mem;
+		break;
+	}
+	ret = uv_page_in(kvm->arch.lpid, __pa(mem), gpa, 0, page_shift);
+	}
+// DEBUG
+
+	if (ret) {
+		printk(KERN_DEBUG "%s page in failed:%d\n", __func__, ret);
 				goto out_finalize;
+	}
 		}
 	}
 
