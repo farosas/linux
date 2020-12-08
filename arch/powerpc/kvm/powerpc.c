@@ -2173,12 +2173,14 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
 	}
 
 	case KVM_CAP_PPC_NESTED_HV:
+/*
 		r = -EINVAL;
 		if (!is_kvmppc_hv_enabled(kvm) ||
 		    !kvm->arch.kvm_ops->enable_nested)
 			break;
 		r = kvm->arch.kvm_ops->enable_nested(kvm);
-		break;
+*/
+		fallthrough;
 #endif
 #if defined(CONFIG_KVM_BOOK3S_HV_POSSIBLE)
 	case KVM_CAP_PPC_SECURE_GUEST:
