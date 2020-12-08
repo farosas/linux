@@ -1089,7 +1089,8 @@ int kvmppc_send_page_to_uv(struct kvm *kvm, unsigned long gfn)
 out:
 	kvm_release_pfn_clean(pfn);
 	mutex_unlock(&kvm->arch.uvmem_lock);
-	return (ret == U_SUCCESS) ? RESUME_GUEST : -EFAULT;
+
+	return (ret == U_SUCCESS || ret == U_BUSY) ? RESUME_GUEST : -EFAULT;
 }
 
 int kvmppc_uvmem_memslot_create(struct kvm *kvm, const struct kvm_memory_slot *new)
