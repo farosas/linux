@@ -18,10 +18,6 @@
 #include <asm/cputhreads.h>
 #include <asm/plpar_wrappers.h>
 
-#define RIC_FLUSH_TLB 0
-#define RIC_FLUSH_PWC 1
-#define RIC_FLUSH_ALL 2
-
 /*
  * tlbiel instruction for radix, set invalidation
  * i.e., r=1 and is=01 or is=10 or is=11
@@ -1286,4 +1282,24 @@ extern void radix_kvm_prefetch_workaround(struct mm_struct *mm)
 	}
 }
 EXPORT_SYMBOL_GPL(radix_kvm_prefetch_workaround);
+
+void do_h_rpt_invalidate(unsigned long pid, unsigned long type,
+			 unsigned long page_size, unsigned long psize,
+			 unsigned long start, unsigned long end)
+{
+	if ((type & H_RPTI_TYPE_ALL) == H_RPTI_TYPE_ALL) {
+		_tlbie_pid(pid, RIC_FLUSH_ALL);
+		return;
+	}
+
+	if (type & H_RPTI_TYPE_PWC)
+		_tlbie_pid(pid, RIC_FLUSH_PWC);
+
+	if (!start && end == -1) /* PID */
+		_tlbie_pid(pid, RIC_FLUSH_TLB);
+	else /* EA */
+		_tlbie_va_range(start, end, pid, page_size, psize, false);
+}
+EXPORT_SYMBOL_GPL(do_h_rpt_invalidate);
+
 #endif /* CONFIG_KVM_BOOK3S_HV_POSSIBLE */

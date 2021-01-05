@@ -4,6 +4,10 @@
 
 #include <asm/hvcall.h>
 
+#define RIC_FLUSH_TLB 0
+#define RIC_FLUSH_PWC 1
+#define RIC_FLUSH_ALL 2
+
 struct vm_area_struct;
 struct mm_struct;
 struct mmu_gather;
@@ -19,6 +23,20 @@ static inline u64 psize_to_rpti_pgsize(unsigned long psize)
 	if (psize == MMU_PAGE_1G)
 		return H_RPTI_PAGE_1G;
 	return H_RPTI_PAGE_ALL;
+}
+
+static inline int rpti_pgsize_to_psize(unsigned long page_size)
+{
+	if (page_size == H_RPTI_PAGE_4K)
+		return MMU_PAGE_4K;
+	if (page_size == H_RPTI_PAGE_64K)
+		return MMU_PAGE_64K;
+	if (page_size == H_RPTI_PAGE_2M)
+		return MMU_PAGE_2M;
+	if (page_size == H_RPTI_PAGE_1G)
+		return MMU_PAGE_1G;
+	else
+		return MMU_PAGE_64K; /* Default */
 }
 
 static inline int mmu_get_ap(int psize)
