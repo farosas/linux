@@ -174,6 +174,7 @@ struct paca_struct {
 	u8 irq_happened;		/* irq happened while soft-disabled */
 	u8 irq_work_pending;		/* IRQ_WORK interrupt while soft-disable */
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
+	/* Could have irq_work_using_hdec here, but what about nested HV entry modifying DEC? Could have a pointer to the hv struct time limit */
 	u8 pmcregs_in_use;		/* pseries puts this in lppaca */
 #endif
 	u64 sprg_vdso;			/* Saved user-visible sprg */
