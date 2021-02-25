@@ -198,6 +198,7 @@ static void kvmppc_tb_resync_done(void)
  * value. Hence the idea is to resync the TB on every HMI, so that we
  * know about the exact state of the TB value. Resync TB call will
  * restore TB to host timebase.
+ *  XXX: could use new opal hmi handler flags for this
  *
  * Things to consider:
  * - On TB error, HMI interrupt is reported on all the threads of the core
@@ -289,6 +290,10 @@ long kvmppc_realmode_hmi_handler(void)
 	 * of guest context.
 	 */
 	wait_for_subcore_guest_exit();
+
+	/*
+	 * XXX: Is this safe with independent threads mode?
+	 */
 
 	/*
 	 * At this point we are sure that primary threads from each
