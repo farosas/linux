@@ -1421,6 +1421,8 @@ static int kvmppc_handle_exit_hv(struct kvm_vcpu *vcpu,
 	 */
 	case BOOK3S_INTERRUPT_H_DATA_STORAGE:
 		r = RESUME_PAGE_FAULT;
+		if (vcpu->arch.fault_dsisr == HDSISR_CANARY)
+			r = RESUME_GUEST; /* Just retry if it's the canary */
 		break;
 	case BOOK3S_INTERRUPT_H_INST_STORAGE:
 		vcpu->arch.fault_dar = kvmppc_get_pc(vcpu);
@@ -3736,14 +3738,14 @@ static int kvmhv_p9_guest_entry(struct kvm_vcpu *vcpu, u64 time_limit,
 		vcpu->arch.shregs.dsisr = mfspr(SPRN_DSISR);
 		vcpu->arch.psscr = mfspr(SPRN_PSSCR_PR);
 		mtspr(SPRN_PSSCR_PR, host_psscr);
-
 		/* H_CEDE has to be handled now, not later */
-		if (trap == BOOK3S_INTERRUPT_SYSCALL && !vcpu->arch.nested &&
+		if (trap == BOOK3S_INTERRUPT_SYSCALL &&
 		    kvmppc_get_gpr(vcpu, 3) == H_CEDE) {
 			kvmppc_cede(vcpu);
 			kvmppc_set_gpr(vcpu, 3, 0);
 			trap = 0;
 		}
+
 	} else {
 		kvmppc_xive_push_vcpu(vcpu);
 		trap = kvmhv_load_hv_regs_and_go(vcpu, time_limit, lpcr);
@@ -3768,9 +3770,10 @@ static int kvmhv_p9_guest_entry(struct kvm_vcpu *vcpu, u64 time_limit,
 			}
 		}
 		kvmppc_xive_pull_vcpu(vcpu);
+
+		vcpu->arch.slb_max = 0;
 	}
 
-	vcpu->arch.slb_max = 0;
 	dec = mfspr(SPRN_DEC);
 	if (!(lpcr & LPCR_LD)) /* Sign extend if not using large decrementer */
 		dec = (s32) dec;
@@ -4429,11 +4432,19 @@ static int kvmppc_vcpu_run_hv(struct kvm_vcpu *vcpu)
 		else
 			r = kvmppc_run_vcpu(vcpu);
 
-		if (run->exit_reason == KVM_EXIT_PAPR_HCALL &&
-		    !(vcpu->arch.shregs.msr & MSR_PR)) {
-			trace_kvm_hcall_enter(vcpu);
-			r = kvmppc_pseries_do_hcall(vcpu);
-			trace_kvm_hcall_exit(vcpu, r);
+		if (run->exit_reason == KVM_EXIT_PAPR_HCALL) {
+			if (unlikely(vcpu->arch.shregs.msr & MSR_PR)) {
+				/*
+				 * Guest userspace executed sc 1, reflect it
+				 * back as a privileged program check interrupt.
+				 */
+				kvmppc_core_queue_program(vcpu, SRR1_PROGPRIV);
+				r = RESUME_GUEST;
+			} else {
+				trace_kvm_hcall_enter(vcpu);
+				r = kvmppc_pseries_do_hcall(vcpu);
+				trace_kvm_hcall_exit(vcpu, r);
+			}
 			kvmppc_core_prepare_to_enter(vcpu);
 		} else if (r == RESUME_PAGE_FAULT) {
 			srcu_idx = srcu_read_lock(&kvm->srcu);

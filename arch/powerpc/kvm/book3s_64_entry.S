@@ -1,10 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #include <asm/asm-offsets.h>
 #include <asm/cache.h>
+#include <asm/code-patching-asm.h>
 #include <asm/exception-64s.h>
+#include <asm/export.h>
 #include <asm/kvm_asm.h>
 #include <asm/kvm_book3s_asm.h>
 #include <asm/ppc_asm.h>
 #include <asm/reg.h>
+#include <asm/ultravisor-api.h>
 
 /*
  * These are branched to from interrupt handlers in exception-64s.S which set
@@ -13,13 +17,24 @@
 .global	kvmppc_hcall
 .balign IFETCH_ALIGN_BYTES
 kvmppc_hcall:
+	lbz	r10,HSTATE_IN_GUEST(r13)
+	cmpwi	r10,KVM_GUEST_MODE_GUEST_HV_FAST
+	beq	kvmppc_p9_exit_hcall
 	ld	r10,PACA_EXGEN+EX_R13(r13)
 	SET_SCRATCH0(r10)
 	li	r10,0xc00
+	li	r11,PACA_EXGEN
+	b	1f
 
 .global	kvmppc_interrupt
 .balign IFETCH_ALIGN_BYTES
 kvmppc_interrupt:
+	std	r10,HSTATE_SCRATCH0(r13)
+	lbz	r10,HSTATE_IN_GUEST(r13)
+	cmpwi	r10,KVM_GUEST_MODE_GUEST_HV_FAST
+	beq	kvmppc_p9_exit_interrupt
+	ld	r10,HSTATE_SCRATCH0(r13)
+	lbz	r11,HSTATE_IN_GUEST(r13)
 	li	r11,PACA_EXGEN
 	cmpdi	r10,0x200
 	bgt+	1f
@@ -114,3 +129,169 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 	GET_SCRATCH0(r13)
 	HRFI_TO_KERNEL
 #endif
+
+/* Stack frame offsets for kvmppc_hv_entry */
+#define SFS			208
+#define STACK_SLOT_VCPU		(SFS-8)
+#define STACK_SLOT_NVGPRS	(SFS-152)	/* 18 gprs */
+
+/*
+ * void kvmppc_p9_enter_guest(struct vcpu *vcpu);
+ *
+ * Enter the guest on a ISAv3.0 or later system where we have exactly
+ * one vcpu per vcore, and both the host and guest are radix, and threads
+ * are set to "indepdent mode".
+ */
+.balign	IFETCH_ALIGN_BYTES
+_GLOBAL(kvmppc_p9_enter_guest)
+EXPORT_SYMBOL_GPL(kvmppc_p9_enter_guest)
+	mflr	r0
+	std	r0,PPC_LR_STKOFF(r1)
+	stdu	r1,-SFS(r1)
+
+	std	r1,HSTATE_HOST_R1(r13)
+	std	r3,STACK_SLOT_VCPU(r1)
+
+	mfcr	r4
+	stw	r4,SFS+8(r1)
+
+	reg = 14
+	.rept	18
+	std	reg,STACK_SLOT_NVGPRS + ((reg - 14) * 8)(r1)
+	reg = reg + 1
+	.endr
+
+	ld	r4,VCPU_LR(r3)
+	mtlr	r4
+	ld	r4,VCPU_CTR(r3)
+	mtctr	r4
+	ld	r4,VCPU_XER(r3)
+	mtspr	SPRN_XER,r4
+
+	ld	r1,VCPU_CR(r3)
+
+BEGIN_FTR_SECTION
+	ld	r4,VCPU_CFAR(r3)
+	mtspr	SPRN_CFAR,r4
+END_FTR_SECTION_IFSET(CPU_FTR_CFAR)
+BEGIN_FTR_SECTION
+	ld	r4,VCPU_PPR(r3)
+	mtspr	SPRN_PPR,r4
+END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
+
+	reg = 4
+	.rept	28
+	ld	reg,__VCPU_GPR(reg)(r3)
+	reg = reg + 1
+	.endr
+
+	ld	r4,VCPU_KVM(r3)
+	lbz	r4,KVM_SECURE_GUEST(r4)
+	cmpdi	r4,0
+	ld	r4,VCPU_GPR(R4)(r3)
+	bne	.Lret_to_ultra
+
+	mtcr	r1
+
+	ld	r0,VCPU_GPR(R0)(r3)
+	ld	r1,VCPU_GPR(R1)(r3)
+	ld	r2,VCPU_GPR(R2)(r3)
+	ld	r3,VCPU_GPR(R3)(r3)
+
+	HRFI_TO_GUEST
+	b	.
+
+	/*
+	 * Use UV_RETURN ultracall to return control back to the Ultravisor
+	 * after processing an hypercall or interrupt that was forwarded
+	 * (a.k.a. reflected) to the Hypervisor.
+	 *
+	 * All registers have already been reloaded except the ucall requires:
+	 *   R0 = hcall result
+	 *   R2 = SRR1, so UV can detect a synthesized interrupt (if any)
+	 *   R3 = UV_RETURN
+	 */
+.Lret_to_ultra:
+	mtcr	r1
+	ld	r1,VCPU_GPR(R1)(r3)
+
+	ld	r0,VCPU_GPR(R3)(r3)
+	mfspr	r2,SPRN_SRR1
+	LOAD_REG_IMMEDIATE(r3, UV_RETURN)
+	sc	2
+
+/*
+ * kvmppc_p9_exit_hcall and kvmppc_p9_exit_interrupt are branched to from
+ * above if the interrupt was taken for a guest that was entered via
+ * kvmppc_p9_enter_guest().
+ *
+ * This code recovers the host stack and vcpu pointer, saves all GPRs and
+ * CR, LR, CTR, XER as well as guest MSR and NIA into the VCPU, then re-
+ * establishes the host stack and registers to return from  the
+ * kvmppc_p9_enter_guest() function.
+ */
+.balign	IFETCH_ALIGN_BYTES
+kvmppc_p9_exit_hcall:
+	mfspr	r11,SPRN_SRR0
+	mfspr	r12,SPRN_SRR1
+	li	r10,0xc00
+	std	r10,HSTATE_SCRATCH0(r13)
+
+.balign	IFETCH_ALIGN_BYTES
+kvmppc_p9_exit_interrupt:
+	std     r1,HSTATE_SCRATCH1(r13)
+	std     r3,HSTATE_SCRATCH2(r13)
+	ld	r1,HSTATE_HOST_R1(r13)
+	ld	r3,STACK_SLOT_VCPU(r1)
+
+	std	r9,VCPU_CR(r3)
+
+1:
+	std	r11,VCPU_PC(r3)
+	std	r12,VCPU_MSR(r3)
+
+	reg = 14
+	.rept	18
+	std	reg,__VCPU_GPR(reg)(r3)
+	reg = reg + 1
+	.endr
+
+	/* r1, r3, r9-r13 are saved to vcpu by C code */
+	std	r0,VCPU_GPR(R0)(r3)
+	std	r2,VCPU_GPR(R2)(r3)
+	reg = 4
+	.rept	5
+	std	reg,__VCPU_GPR(reg)(r3)
+	reg = reg + 1
+	.endr
+
+	ld	r2,PACATOC(r13)
+
+	mflr	r4
+	std	r4,VCPU_LR(r3)
+	mfspr	r4,SPRN_XER
+	std	r4,VCPU_XER(r3)
+
+	reg = 14
+	.rept	18
+	ld	reg,STACK_SLOT_NVGPRS + ((reg - 14) * 8)(r1)
+	reg = reg + 1
+	.endr
+
+	lwz	r4,SFS+8(r1)
+	mtcr	r4
+
+	/*
+	 * Flush the link stack here, before executing the first blr on the
+	 * way out of the guest.
+	 *
+	 * The link stack won't match coming out of the guest anyway so the
+	 * only cost is the flush itself. The call clobbers r0.
+	 */
+1:	nop
+	patch_site 1b patch__call_kvm_flush_link_stack_2
+
+	addi	r1,r1,SFS
+	ld	r0,PPC_LR_STKOFF(r1)
+	mtlr	r0
+	blr
