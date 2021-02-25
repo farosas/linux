@@ -1144,7 +1144,7 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
  * This has to be done early, not in kvmppc_pseries_do_hcall(), so
  * that the cede logic in kvmppc_run_single_vcpu() works properly.
  */
-static void kvmppc_nested_cede(struct kvm_vcpu *vcpu)
+static void kvmppc_cede(struct kvm_vcpu *vcpu)
 {
 	vcpu->arch.shregs.msr |= MSR_EE;
 	vcpu->arch.ceded = 1;
@@ -3731,15 +3731,34 @@ static int kvmhv_p9_guest_entry(struct kvm_vcpu *vcpu, u64 time_limit,
 		/* H_CEDE has to be handled now, not later */
 		if (trap == BOOK3S_INTERRUPT_SYSCALL && !vcpu->arch.nested &&
 		    kvmppc_get_gpr(vcpu, 3) == H_CEDE) {
-			kvmppc_nested_cede(vcpu);
+			kvmppc_cede(vcpu);
 			kvmppc_set_gpr(vcpu, 3, 0);
 			trap = 0;
 		}
 	} else {
 		kvmppc_xive_push_vcpu(vcpu);
 		trap = kvmhv_load_hv_regs_and_go(vcpu, time_limit, lpcr);
-		kvmppc_xive_pull_vcpu(vcpu);
+		/* H_CEDE has to be handled now, not later */
+		/* XICS hcalls must be handled before xive is pulled */
+		if (trap == BOOK3S_INTERRUPT_SYSCALL &&
+		    !(vcpu->arch.shregs.msr & MSR_PR)) {
+			unsigned long req = kvmppc_get_gpr(vcpu, 3);
 
+			if (req == H_CEDE) {
+				kvmppc_cede(vcpu);
+				kvmppc_xive_cede_vcpu(vcpu); /* may un-cede */
+				kvmppc_set_gpr(vcpu, 3, 0);
+				trap = 0;
+			}
+			if (req == H_EOI || req == H_CPPR || req == H_IPI ||
+			    req == H_IPOLL || req == H_XIRR || req == H_XIRR_X) {
+				unsigned long ret;
+				ret = kvmppc_xive_xics_hcall(vcpu, req);
+				kvmppc_set_gpr(vcpu, 3, ret);
+				trap = 0;
+			}
+		}
+		kvmppc_xive_pull_vcpu(vcpu);
 	}
 
 	vcpu->arch.slb_max = 0;
