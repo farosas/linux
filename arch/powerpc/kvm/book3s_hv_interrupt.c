@@ -140,12 +140,51 @@ static void switch_mmu_to_guest_hpt(struct kvm *kvm, struct kvm_vcpu *vcpu, u64 
 }
 
 
-static void switch_mmu_to_host_radix(struct kvm *kvm, u32 pid)
+static void switch_mmu_to_host(struct kvm *kvm, u32 pid)
 {
 	mtspr(SPRN_PID, pid);
 	mtspr(SPRN_LPID, kvm->arch.host_lpid);
 	mtspr(SPRN_LPCR, kvm->arch.host_lpcr);
 	isync();
+
+	/* XXX: could save and restore host SLBs to reduce SLB faults */
+	if (!radix_enabled())
+		slb_restore_bolted_realmode();
+}
+
+static void save_host_mmu(struct kvm *kvm)
+{
+	if (!radix_enabled()) {
+		mtslb(0, 0, 0);
+		slb_invalidate(6);
+	}
+}
+
+static void save_guest_mmu(struct kvm *kvm, struct kvm_vcpu *vcpu)
+{
+	if (kvm_is_radix(kvm)) {
+		radix_clear_slb();
+	} else {
+		int i;
+		int nr = 0;
+
+		/*
+		 * This must run before switching to host (radix host can't
+		 * access all SLBs).
+		 */
+		for (i = 0; i < vcpu->arch.slb_nr; i++) {
+			u64 slbee, slbev;
+			mfslb(i, &slbee, &slbev);
+			if (slbee & SLB_ESID_V) {
+				vcpu->arch.slb[nr].orige = slbee | i;
+				vcpu->arch.slb[nr].origv = slbev;
+				nr++;
+			}
+		}
+		vcpu->arch.slb_max = nr;
+		mtslb(0, 0, 0);
+		slb_invalidate(6);
+	}
 }
 
 int kvmhv_vcpu_entry_p9(struct kvm_vcpu *vcpu, u64 time_limit, unsigned long lpcr)
@@ -252,15 +291,16 @@ int kvmhv_vcpu_entry_p9(struct kvm_vcpu *vcpu, u64 time_limit, unsigned long lpc
 
 	mtspr(SPRN_AMOR, ~0UL);
 
+	if (!radix_enabled() || !kvm_is_radix(kvm) || cpu_has_feature(CPU_FTR_P9_RADIX_PREFETCH_BUG))
+		__mtmsrd(msr & ~(MSR_IR|MSR_DR|MSR_RI), 0);
+
+	save_host_mmu(kvm);
 	if (kvm_is_radix(kvm)) {
-		if (cpu_has_feature(CPU_FTR_P9_RADIX_PREFETCH_BUG))
-			__mtmsrd(msr & ~(MSR_IR|MSR_DR|MSR_RI), 0);
 		switch_mmu_to_guest_radix(kvm, vcpu, lpcr);
 		if (!cpu_has_feature(CPU_FTR_P9_RADIX_PREFETCH_BUG))
 			__mtmsrd(0, 1); /* clear RI */
 
 	} else {
-		__mtmsrd(msr & ~(MSR_IR|MSR_DR|MSR_RI), 0);
 		switch_mmu_to_guest_hpt(kvm, vcpu, lpcr);
 	}
 
@@ -437,31 +477,8 @@ int kvmhv_vcpu_entry_p9(struct kvm_vcpu *vcpu, u64 time_limit, unsigned long lpc
 	/* HDEC must be at least as large as DEC, so decrementer_max fits */
 	mtspr(SPRN_HDEC, decrementer_max);
 
-	if (kvm_is_radix(kvm)) {
-		radix_clear_slb();
-	} else {
-		int i;
-		int nr = 0;
-
-		/*
-		 * This must run before switching to host (radix host can't
-		 * access all SLBs).
-		 */
-		for (i = 0; i < vcpu->arch.slb_nr; i++) {
-			u64 slbee, slbev;
-			mfslb(i, &slbee, &slbev);
-			if (slbee & SLB_ESID_V) {
-				vcpu->arch.slb[nr].orige = slbee | i;
-				vcpu->arch.slb[nr].origv = slbev;
-				nr++;
-			}
-		}
-		vcpu->arch.slb_max = nr;
-		mtslb(0, 0, 0);
-		slb_invalidate(6);
-	}
-
-	switch_mmu_to_host_radix(kvm, host_pidr);
+	save_guest_mmu(kvm, vcpu);
+	switch_mmu_to_host(kvm, host_pidr);
 
 	/*
 	 * If we are in real mode, don't switch MMU on until the MMU is
