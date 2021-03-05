@@ -98,12 +98,20 @@ static void byteswap_hv_regs(struct hv_guest_state *hr)
 }
 
 static void save_hv_return_state(struct kvm_vcpu *vcpu, int trap,
-				 struct hv_guest_state *hr)
+				 struct hv_guest_state *hr, u64 saved_hfscr)
 {
 	struct kvmppc_vcore *vc = vcpu->arch.vcore;
 
+	/*
+	 * During sanitise_hv_regs() we used HFSCR bits from L1 state
+	 * to restrict what the L2 state is allowed to be. Since L1 is
+	 * not allowed to read this SPR, do not include these
+	 * modifications in the return state.
+	 */
+	hr->hfscr = ((~HFSCR_INTR_CAUSE & saved_hfscr) |
+		     (HFSCR_INTR_CAUSE & vcpu->arch.hfscr));
+
 	hr->dpdes = vc->dpdes;
-	hr->hfscr = vcpu->arch.hfscr;
 	hr->purr = vcpu->arch.purr;
 	hr->spurr = vcpu->arch.spurr;
 	hr->ic = vcpu->arch.ic;
@@ -132,12 +140,14 @@ static void save_hv_return_state(struct kvm_vcpu *vcpu, int trap,
 	}
 }
 
-static void sanitise_hv_regs(struct kvm_vcpu *vcpu, struct hv_guest_state *hr)
+static void sanitise_hv_regs(struct kvm_vcpu *vcpu, struct hv_guest_state *hr,
+			     u64 *saved_hfscr)
 {
 	/*
 	 * Don't let L1 enable features for L2 which we've disabled for L1,
 	 * but preserve the interrupt cause field.
 	 */
+	*saved_hfscr = hr->hfscr;
 	hr->hfscr &= (HFSCR_INTR_CAUSE | vcpu->arch.hfscr);
 
 	/* Don't let data address watchpoint match in hypervisor state */
@@ -272,6 +282,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	u64 hdec_exp;
 	s64 delta_purr, delta_spurr, delta_ic, delta_vtb;
 	u64 mask;
+	u64 hfscr;
 	unsigned long lpcr;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
@@ -324,7 +335,8 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	mask = LPCR_DPFD | LPCR_ILE | LPCR_TC | LPCR_AIL | LPCR_LD |
 		LPCR_LPES | LPCR_MER;
 	lpcr = (vc->lpcr & ~mask) | (l2_hv.lpcr & mask);
-	sanitise_hv_regs(vcpu, &l2_hv);
+
+	sanitise_hv_regs(vcpu, &l2_hv, &hfscr);
 	restore_hv_regs(vcpu, &l2_hv);
 
 	vcpu->arch.ret = RESUME_GUEST;
@@ -345,7 +357,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	delta_spurr = vcpu->arch.spurr - l2_hv.spurr;
 	delta_ic = vcpu->arch.ic - l2_hv.ic;
 	delta_vtb = vc->vtb - l2_hv.vtb;
-	save_hv_return_state(vcpu, vcpu->arch.trap, &l2_hv);
+	save_hv_return_state(vcpu, vcpu->arch.trap, &l2_hv, hfscr);
 
 	/* restore L1 state */
 	vcpu->arch.nested = NULL;
