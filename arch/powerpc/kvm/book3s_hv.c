@@ -1067,7 +1067,8 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
 		ret = H_FUNCTION;
 		if (!nesting_enabled(vcpu->kvm))
 			break;
-		ret = kvmhv_enter_nested_guest(vcpu);
+		ret = kvmhv_enter_nested_guest(vcpu, kvmppc_get_gpr(vcpu, 4),
+					       kvmppc_get_gpr(vcpu, 5));
 		if (ret == H_INTERRUPT) {
 			kvmppc_set_gpr(vcpu, 3, 0);
 			vcpu->arch.hcall_needed = 0;

@@ -228,6 +228,7 @@ static int kvmhv_read_guest_state_and_regs(struct kvm_vcpu *vcpu,
 					   u64 hv_ptr, u64 regs_ptr)
 {
 	int size;
+	long int r;
 
 	if (kvm_vcpu_read_guest(vcpu, hv_ptr, &l2_hv->version,
 				sizeof(l2_hv->version)))
@@ -240,9 +241,19 @@ static int kvmhv_read_guest_state_and_regs(struct kvm_vcpu *vcpu,
 	if (size < 0)
 		return -1;
 
-	return kvm_vcpu_read_guest(vcpu, hv_ptr, l2_hv, size) ||
+	r = kvm_vcpu_read_guest(vcpu, hv_ptr, l2_hv, size) ||
 		kvm_vcpu_read_guest(vcpu, regs_ptr, l2_regs,
 				    sizeof(struct pt_regs));
+
+	if (r)
+		return -1;
+
+	if (kvmppc_need_byteswap(vcpu)) {
+		byteswap_hv_regs(l2_hv);
+		byteswap_pt_regs(l2_regs);
+	}
+
+	return 0;
 }
 
 static int kvmhv_write_guest_state_and_regs(struct kvm_vcpu *vcpu,
@@ -251,14 +262,25 @@ static int kvmhv_write_guest_state_and_regs(struct kvm_vcpu *vcpu,
 					    u64 hv_ptr, u64 regs_ptr)
 {
 	int size;
+	long int r;
 
 	size = hv_guest_state_size(l2_hv->version);
 	if (size < 0)
 		return -1;
 
-	return kvm_vcpu_write_guest(vcpu, hv_ptr, l2_hv, size) ||
+	r = kvm_vcpu_write_guest(vcpu, hv_ptr, l2_hv, size) ||
 		kvm_vcpu_write_guest(vcpu, regs_ptr, l2_regs,
 				     sizeof(struct pt_regs));
+
+	if (r)
+		return -1;
+
+	if (kvmppc_need_byteswap(vcpu)) {
+		byteswap_hv_regs(l2_hv);
+		byteswap_pt_regs(l2_regs);
+	}
+
+	return 0;
 }
 
 static void save_l1_state(struct kvm_vcpu *vcpu, struct hv_guest_state *saved_l1_hv,
@@ -328,21 +350,18 @@ static long enter_nested(struct kvm_vcpu *vcpu, struct kvm_nested_guest *l2,
 	return r;
 }
 
-long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
+long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu, u64 hv_ptr, u64 regs_ptr)
 {
 	long int err, r;
 	struct kvm_nested_guest *l2;
 	struct pt_regs l2_regs, saved_l1_regs;
-	struct hv_guest_state l2_hv = {0}, saved_l1_hv;
-	u64 hv_ptr, regs_ptr;
+	struct hv_guest_state l2_hv = {0}, orig_l2_hv, saved_l1_hv;
 	s64 saved_purr, saved_spurr, saved_ic, saved_vtb;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
 		return H_NOT_AVAILABLE;
 
 	/* copy parameters in */
-	hv_ptr = kvmppc_get_gpr(vcpu, 4);
-	regs_ptr = kvmppc_get_gpr(vcpu, 5);
 	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
 	err = kvmhv_read_guest_state_and_regs(vcpu, &l2_hv, &l2_regs,
 					      hv_ptr, regs_ptr);
@@ -350,13 +369,9 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	if (err)
 		return H_PARAMETER;
 
-	if (kvmppc_need_byteswap(vcpu))
-		byteswap_hv_regs(&l2_hv);
 	if (l2_hv.version > HV_GUEST_STATE_VERSION)
 		return H_P2;
 
-	if (kvmppc_need_byteswap(vcpu))
-		byteswap_pt_regs(&l2_regs);
 	if (l2_hv.vcpu_token >= NR_CPUS)
 		return H_PARAMETER;
 
@@ -389,10 +404,6 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	kvmhv_put_nested(l2);
 
 	/* copy l2_hv_state and regs back to guest */
-	if (kvmppc_need_byteswap(vcpu)) {
-		byteswap_hv_regs(&l2_hv);
-		byteswap_pt_regs(&l2_regs);
-	}
 	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
 	err = kvmhv_write_guest_state_and_regs(vcpu, &l2_hv, &l2_regs,
 					       hv_ptr, regs_ptr);
