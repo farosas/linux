@@ -261,6 +261,31 @@ static int kvmhv_write_guest_state_and_regs(struct kvm_vcpu *vcpu,
 				     sizeof(struct pt_regs));
 }
 
+static void save_l1_state(struct kvm_vcpu *vcpu, struct hv_guest_state *saved_l1_hv,
+			  struct pt_regs *saved_l1_regs)
+{
+	/* save l1 values of things */
+	vcpu->arch.regs.msr = vcpu->arch.shregs.msr;
+	*saved_l1_regs = vcpu->arch.regs;
+	kvmhv_save_hv_regs(vcpu, saved_l1_hv);
+}
+
+static void restore_l1_state(struct kvm_vcpu *vcpu, struct hv_guest_state *saved_l1_hv,
+			     struct pt_regs *saved_l1_regs, struct pt_regs *l2_regs)
+{
+      struct kvmppc_vcore *vc = vcpu->arch.vcore;
+
+      vcpu->arch.nested = NULL;
+      vcpu->arch.regs = *saved_l1_regs;
+      vcpu->arch.shregs.msr = saved_l1_regs->msr & ~MSR_TS_MASK;
+      /* set L1 MSR TS field according to L2 transaction state */
+      if (l2_regs->msr & MSR_TS_MASK)
+              vcpu->arch.shregs.msr |= MSR_TS_S;
+
+      vc->tb_offset = saved_l1_hv->tb_offset;
+      restore_hv_regs(vcpu, saved_l1_hv);
+}
+
 long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 {
 	long int err, r;
@@ -270,7 +295,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	struct kvmppc_vcore *vc = vcpu->arch.vcore;
 	u64 hv_ptr, regs_ptr;
 	u64 hdec_exp;
-	s64 delta_purr, delta_spurr, delta_ic, delta_vtb;
+	s64 saved_purr, saved_spurr, saved_ic, saved_vtb;
 	u64 mask;
 	unsigned long lpcr;
 
@@ -307,10 +332,12 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 		mutex_unlock(&l2->tlb_lock);
 	}
 
-	/* save l1 values of things */
-	vcpu->arch.regs.msr = vcpu->arch.shregs.msr;
-	saved_l1_regs = vcpu->arch.regs;
-	kvmhv_save_hv_regs(vcpu, &saved_l1_hv);
+	saved_purr = l2_hv->purr;
+	saved_spurr = l2_hv->spurr;
+	saved_ic = l2_hv->ic;
+	saved_vtb = l2_hv->vtb;
+
+	save_l1_state(vcpu, &saved_l1_hv, &saved_l1_regs);
 
 	/* convert TB values/offsets to host (L0) values */
 	hdec_exp = l2_hv.hdec_expiry - vc->tb_offset;
@@ -341,25 +368,14 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 	/* save L2 state for return */
 	l2_regs = vcpu->arch.regs;
 	l2_regs.msr = vcpu->arch.shregs.msr;
-	delta_purr = vcpu->arch.purr - l2_hv.purr;
-	delta_spurr = vcpu->arch.spurr - l2_hv.spurr;
-	delta_ic = vcpu->arch.ic - l2_hv.ic;
-	delta_vtb = vc->vtb - l2_hv.vtb;
 	save_hv_return_state(vcpu, vcpu->arch.trap, &l2_hv);
 
-	/* restore L1 state */
-	vcpu->arch.nested = NULL;
-	vcpu->arch.regs = saved_l1_regs;
-	vcpu->arch.shregs.msr = saved_l1_regs.msr & ~MSR_TS_MASK;
-	/* set L1 MSR TS field according to L2 transaction state */
-	if (l2_regs.msr & MSR_TS_MASK)
-		vcpu->arch.shregs.msr |= MSR_TS_S;
-	vc->tb_offset = saved_l1_hv.tb_offset;
-	restore_hv_regs(vcpu, &saved_l1_hv);
-	vcpu->arch.purr += delta_purr;
-	vcpu->arch.spurr += delta_spurr;
-	vcpu->arch.ic += delta_ic;
-	vc->vtb += delta_vtb;
+	restore_l1_state(vcpu, &saved_l1_hv, &saved_l1_regs, &l2_hv, &l2_regs);
+
+	vcpu->arch.purr += l2_hv->purr - saved_purr;
+	vcpu->arch.spurr += l2_hv->spurr - saved_spurr;
+	vcpu->arch.ic += l2_hv->ic - saved_ic;
+	vc->vtb += l2_hv->vtb - saved_vtb;
 
 	kvmhv_put_nested(l2);
 
