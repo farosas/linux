@@ -25,6 +25,11 @@ static struct patb_entry *pseries_partition_tb;
 static void kvmhv_update_ptbl_cache(struct kvm_nested_guest *gp);
 static void kvmhv_free_memslot_nest_rmap(struct kvm_memory_slot *free);
 
+struct kvm_nested_regs {
+	struct hv_guest_state hvregs;
+	struct pt_regs regs;
+};
+
 void kvmhv_save_hv_regs(struct kvm_vcpu *vcpu, struct hv_guest_state *hr)
 {
 	struct kvmppc_vcore *vc = vcpu->arch.vcore;
@@ -98,9 +103,11 @@ static void byteswap_hv_regs(struct hv_guest_state *hr)
 }
 
 static void save_return_state(struct kvm_vcpu *vcpu, int trap,
-			      struct hv_guest_state *hr, struct pt_regs *regs)
+			      struct kvm_nested_regs *l2_state)
 {
 	struct kvmppc_vcore *vc = vcpu->arch.vcore;
+	struct hv_guest_state *hr = &l2_state->hvregs;
+	struct pt_regs *regs = &l2_state->regs;
 
 	*regs = vcpu->arch.regs;
 	regs->msr = vcpu->arch.shregs.msr;
@@ -187,14 +194,14 @@ static void restore_hv_regs(struct kvm_vcpu *vcpu, struct hv_guest_state *hr)
 }
 
 static void load_entry_state(struct kvm_vcpu *vcpu, struct kvm_nested_guest *l2,
-			     struct hv_guest_state *l2_hv, struct pt_regs *l2_regs)
+			     struct kvm_nested_regs *l2_state)
 {
 	vcpu->arch.nested = l2;
-	vcpu->arch.nested_vcpu_id = l2_hv->vcpu_token;
-	vcpu->arch.regs = *l2_regs;
+	vcpu->arch.nested_vcpu_id = l2_state->hvregs.vcpu_token;
+	vcpu->arch.regs = l2_state->regs;
 	vcpu->arch.shregs.msr = vcpu->arch.regs.msr;
-	sanitise_hv_regs(vcpu, l2_hv);
-	restore_hv_regs(vcpu, l2_hv);
+	sanitise_hv_regs(vcpu, &l2_state->hvregs);
+	restore_hv_regs(vcpu, &l2_state->hvregs);
 }
 
 void kvmhv_restore_hv_return_state(struct kvm_vcpu *vcpu,
@@ -304,43 +311,42 @@ static int kvmhv_write_guest_state_and_regs(struct kvm_vcpu *vcpu,
 	return 0;
 }
 
-static void save_l1_state(struct kvm_vcpu *vcpu, struct hv_guest_state *saved_l1_hv,
-			  struct pt_regs *saved_l1_regs)
+static void save_l1_state(struct kvm_vcpu *vcpu, struct kvm_nested_regs *saved_l1_state)
 {
 	/* save l1 values of things */
 	vcpu->arch.regs.msr = vcpu->arch.shregs.msr;
-	*saved_l1_regs = vcpu->arch.regs;
-	kvmhv_save_hv_regs(vcpu, saved_l1_hv);
+	saved_l1_state->regs = vcpu->arch.regs;
+	kvmhv_save_hv_regs(vcpu, &saved_l1_state->hvregs);
 }
 
-static void restore_l1_state(struct kvm_vcpu *vcpu, struct hv_guest_state *saved_l1_hv,
-			     struct pt_regs *saved_l1_regs, struct pt_regs *l2_regs)
+static void restore_l1_state(struct kvm_vcpu *vcpu, struct kvm_nested_regs *saved_l1_state,
+			     struct pt_regs *l2_regs)
 {
       struct kvmppc_vcore *vc = vcpu->arch.vcore;
 
       vcpu->arch.nested = NULL;
-      vcpu->arch.regs = *saved_l1_regs;
-      vcpu->arch.shregs.msr = saved_l1_regs->msr & ~MSR_TS_MASK;
+      vcpu->arch.regs = saved_l1_state->regs;
+      vcpu->arch.shregs.msr = saved_l1_state->regs.msr & ~MSR_TS_MASK;
       /* set L1 MSR TS field according to L2 transaction state */
       if (l2_regs->msr & MSR_TS_MASK)
               vcpu->arch.shregs.msr |= MSR_TS_S;
 
-      vc->tb_offset = saved_l1_hv->tb_offset;
-      restore_hv_regs(vcpu, saved_l1_hv);
+      vc->tb_offset = saved_l1_state->hvregs.tb_offset;
+      restore_hv_regs(vcpu, &saved_l1_state->hvregs);
 }
 
 static long enter_nested(struct kvm_vcpu *vcpu, struct kvm_nested_guest *l2,
-			 struct hv_guest_state *l2_hv, struct pt_regs *l2_regs)
+			 struct kvm_nested_regs *l2_state)
 {
 	long int r;
 	u64 hdec_exp;
 	struct kvmppc_vcore *vc = vcpu->arch.vcore;
 
 	/* convert TB values/offsets to host (L0) values */
-	hdec_exp = l2_hv->hdec_expiry - vc->tb_offset;
-	vc->tb_offset += l2_hv->tb_offset;
+	hdec_exp = l2_state->hvregs.hdec_expiry - vc->tb_offset;
+	vc->tb_offset += l2_state->hvregs.tb_offset;
 
-	load_entry_state(vcpu, l2, l2_hv, l2_regs);
+	load_entry_state(vcpu, l2, l2_state);
 
 	vcpu->arch.ret = RESUME_GUEST;
 	vcpu->arch.trap = 0;
@@ -350,10 +356,10 @@ static long enter_nested(struct kvm_vcpu *vcpu, struct kvm_nested_guest *l2,
 			r = RESUME_HOST;
 			break;
 		}
-		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, l2_hv->lpcr);
+		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, l2_state->hvregs.lpcr);
 	} while (is_kvmppc_resume_guest(r));
 
-	save_return_state(vcpu, vcpu->arch.trap, l2_hv, l2_regs);
+	save_return_state(vcpu, vcpu->arch.trap, l2_state);
 
 	return r;
 }
@@ -362,8 +368,8 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu, u64 hv_ptr, u64 regs_ptr)
 {
 	long int err, r;
 	struct kvm_nested_guest *l2;
-	struct pt_regs l2_regs, saved_l1_regs;
-	struct hv_guest_state l2_hv = {0}, orig_l2_hv, saved_l1_hv;
+	struct kvm_nested_regs l2_state, saved_l1_state;
+	struct kvmppc_vcore *vc = vcpu->arch.vcore;
 	s64 saved_purr, saved_spurr, saved_ic, saved_vtb;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
@@ -371,20 +377,20 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu, u64 hv_ptr, u64 regs_ptr)
 
 	/* copy parameters in */
 	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
-	err = kvmhv_read_guest_state_and_regs(vcpu, &l2_hv, &l2_regs,
+	err = kvmhv_read_guest_state_and_regs(vcpu, &l2_state.hvregs, &l2_state.regs,
 					      hv_ptr, regs_ptr);
 	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
 	if (err)
 		return H_PARAMETER;
 
-	if (l2_hv.version > HV_GUEST_STATE_VERSION)
+	if (l2_state.hvregs.version > HV_GUEST_STATE_VERSION)
 		return H_P2;
 
-	if (l2_hv.vcpu_token >= NR_CPUS)
+	if (l2_state.hvregs.vcpu_token >= NR_CPUS)
 		return H_PARAMETER;
 
 	/* translate lpid */
-	l2 = kvmhv_get_nested(vcpu->kvm, l2_hv.lpid, true);
+	l2 = kvmhv_get_nested(vcpu->kvm, l2_state.hvregs.lpid, true);
 	if (!l2)
 		return H_PARAMETER;
 	if (!l2->l1_gr_to_hr) {
@@ -393,27 +399,27 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu, u64 hv_ptr, u64 regs_ptr)
 		mutex_unlock(&l2->tlb_lock);
 	}
 
-	saved_purr = l2_hv->purr;
-	saved_spurr = l2_hv->spurr;
-	saved_ic = l2_hv->ic;
-	saved_vtb = l2_hv->vtb;
+	saved_purr = l2_state.hvregs.purr;
+	saved_spurr = l2_state.hvregs.spurr;
+	saved_ic = l2_state.hvregs.ic;
+	saved_vtb = l2_state.hvregs.vtb;
 
-	save_l1_state(vcpu, &saved_l1_hv, &saved_l1_regs);
+	save_l1_state(vcpu, &saved_l1_state);
 
-	r = enter_nested(vcpu, l2, &l2_hv, &l2_regs);
+	r = enter_nested(vcpu, l2, &l2_state);
 
-	restore_l1_state(vcpu, &saved_l1_hv, &saved_l1_regs, &l2_hv, &l2_regs);
+	restore_l1_state(vcpu, &saved_l1_state, &l2_state.regs);
 
-	vcpu->arch.purr += l2_hv->purr - saved_purr;
-	vcpu->arch.spurr += l2_hv->spurr - saved_spurr;
-	vcpu->arch.ic += l2_hv->ic - saved_ic;
-	vc->vtb += l2_hv->vtb - saved_vtb;
+	vcpu->arch.purr += l2_state.hvregs.purr - saved_purr;
+	vcpu->arch.spurr += l2_state.hvregs.spurr - saved_spurr;
+	vcpu->arch.ic += l2_state.hvregs.ic - saved_ic;
+	vc->vtb += l2_state.hvregs.vtb - saved_vtb;
 
 	kvmhv_put_nested(l2);
 
-	/* copy l2_hv_state and regs back to guest */
+	/* copy l2 hv_state and regs back to guest */
 	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
-	err = kvmhv_write_guest_state_and_regs(vcpu, &l2_hv, &l2_regs,
+	err = kvmhv_write_guest_state_and_regs(vcpu, &l2_state.hvregs, &l2_state.regs,
 					       hv_ptr, regs_ptr);
 	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
 	if (err)
