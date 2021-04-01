@@ -286,18 +286,56 @@ static void restore_l1_state(struct kvm_vcpu *vcpu, struct hv_guest_state *saved
       restore_hv_regs(vcpu, saved_l1_hv);
 }
 
+static long enter_nested(struct kvm_vcpu *vcpu, struct kvm_nested_guest *l2,
+			 struct hv_guest_state *l2_hv, struct pt_regs *l2_regs)
+{
+	long int r;
+	struct kvmppc_vcore *vc = vcpu->arch.vcore;
+	u64 hdec_exp, mask;
+	unsigned long lpcr;
+
+	/* convert TB values/offsets to host (L0) values */
+	hdec_exp = l2_hv->hdec_expiry - vc->tb_offset;
+	vc->tb_offset += l2_hv->tb_offset;
+
+	/* set L1 state to L2 state */
+	vcpu->arch.nested = l2;
+	vcpu->arch.nested_vcpu_id = l2_hv->vcpu_token;
+	vcpu->arch.regs = *l2_regs;
+	vcpu->arch.shregs.msr = vcpu->arch.regs.msr;
+	mask = LPCR_DPFD | LPCR_ILE | LPCR_TC | LPCR_AIL | LPCR_LD |
+		LPCR_LPES | LPCR_MER;
+	lpcr = (vc->lpcr & ~mask) | (l2_hv->lpcr & mask);
+	sanitise_hv_regs(vcpu, l2_hv);
+	restore_hv_regs(vcpu, l2_hv);
+
+	vcpu->arch.ret = RESUME_GUEST;
+	vcpu->arch.trap = 0;
+	do {
+		if (mftb() >= hdec_exp) {
+			vcpu->arch.trap = BOOK3S_INTERRUPT_HV_DECREMENTER;
+			r = RESUME_HOST;
+			break;
+		}
+		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
+	} while (is_kvmppc_resume_guest(r));
+
+	/* save L2 state for return */
+	*l2_regs = vcpu->arch.regs;
+	l2_regs->msr = vcpu->arch.shregs.msr;
+	save_hv_return_state(vcpu, vcpu->arch.trap, l2_hv);
+
+	return r;
+}
+
 long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 {
 	long int err, r;
 	struct kvm_nested_guest *l2;
 	struct pt_regs l2_regs, saved_l1_regs;
 	struct hv_guest_state l2_hv = {0}, saved_l1_hv;
-	struct kvmppc_vcore *vc = vcpu->arch.vcore;
 	u64 hv_ptr, regs_ptr;
-	u64 hdec_exp;
 	s64 saved_purr, saved_spurr, saved_ic, saved_vtb;
-	u64 mask;
-	unsigned long lpcr;
 
 	if (vcpu->kvm->arch.l1_ptcr == 0)
 		return H_NOT_AVAILABLE;
@@ -339,36 +377,7 @@ long kvmhv_enter_nested_guest(struct kvm_vcpu *vcpu)
 
 	save_l1_state(vcpu, &saved_l1_hv, &saved_l1_regs);
 
-	/* convert TB values/offsets to host (L0) values */
-	hdec_exp = l2_hv.hdec_expiry - vc->tb_offset;
-	vc->tb_offset += l2_hv.tb_offset;
-
-	/* set L1 state to L2 state */
-	vcpu->arch.nested = l2;
-	vcpu->arch.nested_vcpu_id = l2_hv.vcpu_token;
-	vcpu->arch.regs = l2_regs;
-	vcpu->arch.shregs.msr = vcpu->arch.regs.msr;
-	mask = LPCR_DPFD | LPCR_ILE | LPCR_TC | LPCR_AIL | LPCR_LD |
-		LPCR_LPES | LPCR_MER;
-	lpcr = (vc->lpcr & ~mask) | (l2_hv.lpcr & mask);
-	sanitise_hv_regs(vcpu, &l2_hv);
-	restore_hv_regs(vcpu, &l2_hv);
-
-	vcpu->arch.ret = RESUME_GUEST;
-	vcpu->arch.trap = 0;
-	do {
-		if (mftb() >= hdec_exp) {
-			vcpu->arch.trap = BOOK3S_INTERRUPT_HV_DECREMENTER;
-			r = RESUME_HOST;
-			break;
-		}
-		r = kvmhv_run_single_vcpu(vcpu, hdec_exp, lpcr);
-	} while (is_kvmppc_resume_guest(r));
-
-	/* save L2 state for return */
-	l2_regs = vcpu->arch.regs;
-	l2_regs.msr = vcpu->arch.shregs.msr;
-	save_hv_return_state(vcpu, vcpu->arch.trap, &l2_hv);
+	r = enter_nested(vcpu, l2, &l2_hv, &l2_regs);
 
 	restore_l1_state(vcpu, &saved_l1_hv, &saved_l1_regs, &l2_hv, &l2_regs);
 
