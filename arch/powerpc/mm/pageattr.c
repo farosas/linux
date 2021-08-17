@@ -19,6 +19,7 @@ static int change_page_attr(pte_t *ptep, unsigned long addr, void *data)
 {
 	long action = (long)data;
 	pte_t pte;
+	bool downgrade = (action == SET_MEMORY_RO || action == SET_MEMORY_NX);
 
 	spin_lock(&init_mm.page_table_lock);
 	pte = *ptep;
@@ -43,7 +44,11 @@ static int change_page_attr(pte_t *ptep, unsigned long addr, void *data)
 	}
 
 	pte_update(&init_mm, addr, ptep, ~0UL, pte_val(pte), 0);
-	flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
+
+	if (downgrade)
+		flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
+	else if (radix_enabled())
+		asm volatile("ptesync": : :"memory");
 
 	spin_unlock(&init_mm.page_table_lock);
 
