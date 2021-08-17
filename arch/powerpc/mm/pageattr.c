@@ -15,30 +15,13 @@
 #include <asm/pgtable.h>
 
 
-/*
- * Updates the attributes of a page in three steps:
- *
- * 1. invalidate the page table entry
- * 2. flush the TLB
- * 3. install the new entry with the updated attributes
- *
- * Invalidating the pte means there are situations where this will not work
- * when in theory it should.
- * For example:
- * - removing write from page whilst it is being executed
- * - setting a page read-only whilst it is being read by another CPU
- *
- */
 static int change_page_attr(pte_t *ptep, unsigned long addr, void *data)
 {
 	long action = (long)data;
 	pte_t pte;
 
 	spin_lock(&init_mm.page_table_lock);
-
-	/* invalidate the PTE so it's safe to modify */
-	pte = ptep_get_and_clear(&init_mm, addr, ptep);
-	flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
+	pte = *ptep;
 
 	/* modify the PTE bits as desired, then apply */
 	switch (action) {
@@ -59,11 +42,9 @@ static int change_page_attr(pte_t *ptep, unsigned long addr, void *data)
 		break;
 	}
 
-	set_pte_at(&init_mm, addr, ptep, pte);
+	pte_update(&init_mm, addr, ptep, ~0UL, pte_val(pte), 0);
+	flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
 
-	/* See ptesync comment in radix__set_pte_at() */
-	if (radix_enabled())
-		asm volatile("ptesync": : :"memory");
 	spin_unlock(&init_mm.page_table_lock);
 
 	return 0;
