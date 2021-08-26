@@ -6017,7 +6017,7 @@ static int kvmppc_radix_possible(void)
 	return cpu_has_feature(CPU_FTR_ARCH_300) && radix_enabled();
 }
 
-static int kvmppc_book3s_init_hv(void)
+int kvmppc_book3s_init_hv(void)
 {
 	int r;
 
@@ -6094,7 +6094,7 @@ err:
 	return r;
 }
 
-static void kvmppc_book3s_exit_hv(void)
+void kvmppc_book3s_exit_hv(void)
 {
 	kvmppc_uvmem_free();
 	kvmppc_free_host_rm_ops();
@@ -6103,9 +6103,3 @@ static void kvmppc_book3s_exit_hv(void)
 	kvmppc_hv_ops = NULL;
 	kvmhv_nested_exit();
 }
-
-module_init(kvmppc_book3s_init_hv);
-module_exit(kvmppc_book3s_exit_hv);
-MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(KVM_MINOR);
-MODULE_ALIAS("devname:kvm");

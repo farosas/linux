@@ -22,9 +22,28 @@ extern int kvmppc_core_emulate_mtspr_pr(struct kvm_vcpu *vcpu,
 					int sprn, ulong spr_val);
 extern int kvmppc_core_emulate_mfspr_pr(struct kvm_vcpu *vcpu,
 					int sprn, ulong *spr_val);
+#ifdef CONFIG_KVM_BOOK3S_PR_POSSIBLE
 extern int kvmppc_book3s_init_pr(void);
-void kvmppc_book3s_exit_pr(void);
+extern void kvmppc_book3s_exit_pr(void);
 extern int kvmppc_handle_exit_pr(struct kvm_vcpu *vcpu, unsigned int exit_nr);
+#else
+static inline int kvmppc_book3s_init_pr(void)
+{
+	return 0;
+}
+static inline void kvmppc_book3s_exit_pr(void) {}
+#endif
+
+#ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
+extern int kvmppc_book3s_init_hv(void);
+extern void kvmppc_book3s_exit_hv(void);
+#else
+static inline int kvmppc_book3s_init_hv(void)
+{
+	return 0;
+}
+static inline void kvmppc_book3s_exit_hv(void) {}
+#endif
 
 #ifdef CONFIG_PPC_TRANSACTIONAL_MEM
 extern void kvmppc_emulate_tabort(struct kvm_vcpu *vcpu, int ra_val);

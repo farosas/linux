@@ -40,12 +40,43 @@ config KVM_BOOK3S_64_HANDLER
 	select KVM_BOOK3S_HANDLER
 
 config KVM_BOOK3S_PR_POSSIBLE
-	bool
+	bool "KVM support without using hypervisor mode in host"
+	depends on KVM_BOOK3S_64 || KVM_BOOK3S_32
 	select KVM_MMIO
 	select MMU_NOTIFIER
+	help
+	  Support running guest kernels in virtual machines on processors
+	  without using hypervisor mode in the host, by running the
+	  guest in user mode (problem state) and emulating all
+	  privileged instructions and registers.
+
+	  This is not as fast as using hypervisor mode, but works on
+	  where hypervisor mode is not available or not usable,
+	  and can emulate processors that are different from the host
+	  processor, including emulating 32-bit processors on a 64-bit
+	  host.
+
 
 config KVM_BOOK3S_HV_POSSIBLE
-	bool
+	bool "KVM for POWER7 and later using hypervisor mode in host"
+	depends on KVM_BOOK3S_64
+	select MMU_NOTIFIER
+	select CMA
+	help
+	  Support running unmodified book3s_64 guest kernels in
+	  virtual machines on POWER7 and newer processors that have
+	  hypervisor mode available to the host.
+
+	  If you say Y here, KVM will use the hardware virtualization
+	  facilities of POWER7 (and later) processors, meaning that
+	  guest operating systems will run at full hardware speed
+	  using supervisor and user modes.  However, this also means
+	  that KVM is not usable under PowerVM (pHyp), is only usable
+	  on POWER7 or later processors, and cannot emulate a
+	  different processor from the host processor.
+
+	  If unsure, say N.
+
 
 config KVM_BOOK3S_32
 	tristate "KVM support for PowerPC book3s_32 processors"
@@ -78,43 +109,6 @@ config KVM_BOOK3S_64
 	  a character device node named /dev/kvm.
 
 	  If unsure, say N.
-
-config KVM_BOOK3S_64_HV
-	tristate "KVM for POWER7 and later using hypervisor mode in host"
-	depends on KVM_BOOK3S_64 && PPC_POWERNV
-	select KVM_BOOK3S_HV_POSSIBLE
-	select MMU_NOTIFIER
-	select CMA
-	help
-	  Support running unmodified book3s_64 guest kernels in
-	  virtual machines on POWER7 and newer processors that have
-	  hypervisor mode available to the host.
-
-	  If you say Y here, KVM will use the hardware virtualization
-	  facilities of POWER7 (and later) processors, meaning that
-	  guest operating systems will run at full hardware speed
-	  using supervisor and user modes.  However, this also means
-	  that KVM is not usable under PowerVM (pHyp), is only usable
-	  on POWER7 or later processors, and cannot emulate a
-	  different processor from the host processor.
-
-	  If unsure, say N.
-
-config KVM_BOOK3S_64_PR
-	tristate "KVM support without using hypervisor mode in host"
-	depends on KVM_BOOK3S_64
-	select KVM_BOOK3S_PR_POSSIBLE
-	help
-	  Support running guest kernels in virtual machines on processors
-	  without using hypervisor mode in the host, by running the
-	  guest in user mode (problem state) and emulating all
-	  privileged instructions and registers.
-
-	  This is not as fast as using hypervisor mode, but works on
-	  machines where hypervisor mode is not available or not usable,
-	  and can emulate processors that are different from the host
-	  processor, including emulating 32-bit processors on a 64-bit
-	  host.
 
 config KVM_BOOK3S_HV_EXIT_TIMING
 	bool "Detailed timing for hypervisor real-mode code"

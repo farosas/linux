@@ -1060,6 +1060,24 @@ int kvm_irq_map_chip_pin(struct kvm *kvm, unsigned irqchip, unsigned pin)
 
 #endif /* CONFIG_KVM_XICS */
 
+static int kvmppc_init(void)
+{
+	int r;
+
+	r = kvmppc_book3s_init_hv();
+	if (r)
+		pr_err("KVM-HV: could not load (%d)\n", r);
+
+	r = kvmppc_book3s_init_pr();
+	if (r)
+		pr_err("KVM-PR: could not load (%d)\n", r);
+
+	if (!kvmppc_hv_ops && !kvmppc_pr_ops)
+		return -EINVAL;
+
+	return 0;
+}
+
 static int kvmppc_book3s_init(void)
 {
 	int r;
@@ -1067,9 +1085,10 @@ static int kvmppc_book3s_init(void)
 	r = kvm_init(NULL, sizeof(struct kvm_vcpu), 0, THIS_MODULE);
 	if (r)
 		return r;
-#ifdef CONFIG_KVM_BOOK3S_32_HANDLER
-	r = kvmppc_book3s_init_pr();
-#endif
+
+	r = kvmppc_init();
+	if (r)
+		goto exit;
 
 #ifdef CONFIG_KVM_XICS
 #ifdef CONFIG_KVM_XIVE
@@ -1082,22 +1101,35 @@ static int kvmppc_book3s_init(void)
 #endif
 		kvm_register_device_ops(&kvm_xics_ops, KVM_DEV_TYPE_XICS);
 #endif
+	return 0;
+
+exit:
+	kvm_exit();
 	return r;
 }
 
 static void kvmppc_book3s_exit(void)
 {
-#ifdef CONFIG_KVM_BOOK3S_32_HANDLER
 	kvmppc_book3s_exit_pr();
-#endif
+	kvmppc_book3s_exit_hv();
 	kvm_exit();
 }
 
 module_init(kvmppc_book3s_init);
 module_exit(kvmppc_book3s_exit);
 
-/* On 32bit this is our one and only kernel module */
-#ifdef CONFIG_KVM_BOOK3S_32_HANDLER
 MODULE_ALIAS_MISCDEV(KVM_MINOR);
 MODULE_ALIAS("devname:kvm");
+
+/*
+ * Whether we use KVM-HV or KVM-PR is dependent exclusively on the
+ * config options. These aliases are here only to ease the transition
+ * to the one module model we have now.
+ */
+#ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
+MODULE_ALIAS("kvm-hv");
+#endif
+
+#ifdef CONFIG_KVM_BOOK3S_PR_POSSIBLE
+MODULE_ALIAS("kvm-pr");
 #endif
