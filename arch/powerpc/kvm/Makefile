@@ -108,6 +108,14 @@ kvm-book3s_64-module-objs := \
 	book3s_rtas.o \
 	$(kvm-book3s_64-objs-y)
 
+ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
+kvm-book3s_64-module-objs += $(kvm-hv-y)
+endif
+
+ifdef CONFIG_KVM_BOOK3S_PR_POSSIBLE
+kvm-book3s_64-module-objs += $(kvm-pr-y)
+endif
+
 kvm-objs-$(CONFIG_KVM_BOOK3S_64) := $(kvm-book3s_64-module-objs)
 
 kvm-book3s_32-objs := \
@@ -133,8 +141,5 @@ obj-$(CONFIG_KVM_E500V2) += kvm.o
 obj-$(CONFIG_KVM_E500MC) += kvm.o
 obj-$(CONFIG_KVM_BOOK3S_64) += kvm.o
 obj-$(CONFIG_KVM_BOOK3S_32) += kvm.o
-
-obj-$(CONFIG_KVM_BOOK3S_64_PR) += kvm-pr.o
-obj-$(CONFIG_KVM_BOOK3S_64_HV) += kvm-hv.o
 
 obj-y += $(kvm-book3s_64-builtin-objs-y)

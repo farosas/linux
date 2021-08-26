@@ -2100,16 +2100,3 @@ void kvmppc_book3s_exit_pr(void)
 	kvmppc_pr_ops = NULL;
 	kvmppc_mmu_hpte_sysexit();
 }
-
-/*
- * We only support separate modules for book3s 64
- */
-#ifdef CONFIG_PPC_BOOK3S_64
-
-module_init(kvmppc_book3s_init_pr);
-module_exit(kvmppc_book3s_exit_pr);
-
-MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(KVM_MINOR);
-MODULE_ALIAS("devname:kvm");
-#endif
