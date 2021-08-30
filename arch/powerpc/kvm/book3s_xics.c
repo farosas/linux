@@ -870,7 +870,6 @@ int kvmppc_xics_rm_complete(struct kvm_vcpu *vcpu, u32 hcall)
 
 	return H_SUCCESS;
 }
-EXPORT_SYMBOL_GPL(kvmppc_xics_rm_complete);
 
 int kvmppc_xics_hcall(struct kvm_vcpu *vcpu, u32 req)
 {
@@ -917,7 +916,6 @@ int kvmppc_xics_hcall(struct kvm_vcpu *vcpu, u32 req)
 
 	return rc;
 }
-EXPORT_SYMBOL_GPL(kvmppc_xics_hcall);
 
 
 /* -- Initialisation code etc. -- */
@@ -1498,7 +1496,6 @@ void kvmppc_xics_set_mapped(struct kvm *kvm, unsigned long irq,
 	ics->irq_state[idx].host_irq = host_irq;
 	ics->irq_state[idx].intr_cpu = -1;
 }
-EXPORT_SYMBOL_GPL(kvmppc_xics_set_mapped);
 
 void kvmppc_xics_clr_mapped(struct kvm *kvm, unsigned long irq,
 			    unsigned long host_irq)
@@ -1513,4 +1510,3 @@ void kvmppc_xics_clr_mapped(struct kvm *kvm, unsigned long irq,
 
 	ics->irq_state[idx].host_irq = 0;
 }
-EXPORT_SYMBOL_GPL(kvmppc_xics_clr_mapped);

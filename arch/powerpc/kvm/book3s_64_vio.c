@@ -606,7 +606,6 @@ unlock_exit:
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(kvmppc_h_put_tce);
 
 long kvmppc_h_put_tce_indirect(struct kvm_vcpu *vcpu,
 		unsigned long liobn, unsigned long ioba,
@@ -703,7 +702,6 @@ unlock_exit:
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(kvmppc_h_put_tce_indirect);
 
 long kvmppc_h_stuff_tce(struct kvm_vcpu *vcpu,
 		unsigned long liobn, unsigned long ioba,
@@ -752,4 +750,3 @@ invalidate_exit:
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(kvmppc_h_stuff_tce);

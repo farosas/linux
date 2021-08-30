@@ -145,7 +145,6 @@ void kvmppc_xive_push_vcpu(struct kvm_vcpu *vcpu)
 			vcpu->arch.xive_esc_on = 0;
 	}
 }
-EXPORT_SYMBOL_GPL(kvmppc_xive_push_vcpu);
 
 /*
  * Pull a vcpu's context from the XIVE on guest exit.
@@ -177,7 +176,6 @@ void kvmppc_xive_pull_vcpu(struct kvm_vcpu *vcpu)
 	vcpu->arch.xive_pushed = 0;
 	eieio();
 }
-EXPORT_SYMBOL_GPL(kvmppc_xive_pull_vcpu);
 
 void kvmppc_xive_rearm_escalation(struct kvm_vcpu *vcpu)
 {
@@ -211,7 +209,6 @@ void kvmppc_xive_rearm_escalation(struct kvm_vcpu *vcpu)
 	}
 	mb();
 }
-EXPORT_SYMBOL_GPL(kvmppc_xive_rearm_escalation);
 
 /*
  * This is a simple trigger for a generic XIVE IRQ. This must
@@ -1037,7 +1034,6 @@ int kvmppc_xive_set_mapped(struct kvm *kvm, unsigned long guest_irq,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(kvmppc_xive_set_mapped);
 
 int kvmppc_xive_clr_mapped(struct kvm *kvm, unsigned long guest_irq,
 			   unsigned long host_irq)
@@ -1117,7 +1113,6 @@ int kvmppc_xive_clr_mapped(struct kvm *kvm, unsigned long guest_irq,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(kvmppc_xive_clr_mapped);
 
 void kvmppc_xive_disable_vcpu_interrupts(struct kvm_vcpu *vcpu)
 {
@@ -2199,7 +2194,6 @@ int kvmppc_xive_xics_hcall(struct kvm_vcpu *vcpu, u32 req)
 
 	return H_UNSUPPORTED;
 }
-EXPORT_SYMBOL_GPL(kvmppc_xive_xics_hcall);
 
 int kvmppc_xive_debug_show_queues(struct seq_file *m, struct kvm_vcpu *vcpu)
 {

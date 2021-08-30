@@ -186,27 +186,23 @@ void kvmppc_book3s_queue_irqprio(struct kvm_vcpu *vcpu, unsigned int vec)
 	printk(KERN_INFO "Queueing interrupt %x\n", vec);
 #endif
 }
-EXPORT_SYMBOL_GPL(kvmppc_book3s_queue_irqprio);
 
 void kvmppc_core_queue_machine_check(struct kvm_vcpu *vcpu, ulong flags)
 {
 	/* might as well deliver this straight away */
 	kvmppc_inject_interrupt(vcpu, BOOK3S_INTERRUPT_MACHINE_CHECK, flags);
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_queue_machine_check);
 
 void kvmppc_core_queue_syscall(struct kvm_vcpu *vcpu)
 {
 	kvmppc_inject_interrupt(vcpu, BOOK3S_INTERRUPT_SYSCALL, 0);
 }
-EXPORT_SYMBOL(kvmppc_core_queue_syscall);
 
 void kvmppc_core_queue_program(struct kvm_vcpu *vcpu, ulong flags)
 {
 	/* might as well deliver this straight away */
 	kvmppc_inject_interrupt(vcpu, BOOK3S_INTERRUPT_PROGRAM, flags);
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_queue_program);
 
 void kvmppc_core_queue_fpunavail(struct kvm_vcpu *vcpu)
 {
@@ -230,19 +226,16 @@ void kvmppc_core_queue_dec(struct kvm_vcpu *vcpu)
 {
 	kvmppc_book3s_queue_irqprio(vcpu, BOOK3S_INTERRUPT_DECREMENTER);
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_queue_dec);
 
 int kvmppc_core_pending_dec(struct kvm_vcpu *vcpu)
 {
 	return test_bit(BOOK3S_IRQPRIO_DECREMENTER, &vcpu->arch.pending_exceptions);
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_pending_dec);
 
 void kvmppc_core_dequeue_dec(struct kvm_vcpu *vcpu)
 {
 	kvmppc_book3s_dequeue_irqprio(vcpu, BOOK3S_INTERRUPT_DECREMENTER);
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_dequeue_dec);
 
 void kvmppc_core_queue_external(struct kvm_vcpu *vcpu,
                                 struct kvm_interrupt *irq)
@@ -285,13 +278,11 @@ void kvmppc_core_queue_data_storage(struct kvm_vcpu *vcpu, ulong dar,
 	kvmppc_set_dsisr(vcpu, flags);
 	kvmppc_inject_interrupt(vcpu, BOOK3S_INTERRUPT_DATA_STORAGE, 0);
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_queue_data_storage);
 
 void kvmppc_core_queue_inst_storage(struct kvm_vcpu *vcpu, ulong flags)
 {
 	kvmppc_inject_interrupt(vcpu, BOOK3S_INTERRUPT_INST_STORAGE, flags);
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_queue_inst_storage);
 
 static int kvmppc_book3s_irqprio_deliver(struct kvm_vcpu *vcpu,
 					 unsigned int priority)
@@ -423,7 +414,6 @@ int kvmppc_core_prepare_to_enter(struct kvm_vcpu *vcpu)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(kvmppc_core_prepare_to_enter);
 
 kvm_pfn_t kvmppc_gpa_to_pfn(struct kvm_vcpu *vcpu, gpa_t gpa, bool writing,
 			bool *writable)
@@ -449,7 +439,6 @@ kvm_pfn_t kvmppc_gpa_to_pfn(struct kvm_vcpu *vcpu, gpa_t gpa, bool writing,
 
 	return gfn_to_pfn_prot(vcpu->kvm, gfn, writing, writable);
 }
-EXPORT_SYMBOL_GPL(kvmppc_gpa_to_pfn);
 
 int kvmppc_xlate(struct kvm_vcpu *vcpu, ulong eaddr, enum xlate_instdata xlid,
 		 enum xlate_readwrite xlrw, struct kvmppc_pte *pte)
@@ -496,7 +485,6 @@ int kvmppc_load_last_inst(struct kvm_vcpu *vcpu,
 	else
 		return EMULATE_AGAIN;
 }
-EXPORT_SYMBOL_GPL(kvmppc_load_last_inst);
 
 int kvmppc_subarch_vcpu_init(struct kvm_vcpu *vcpu)
 {
@@ -783,7 +771,6 @@ void kvmppc_set_msr(struct kvm_vcpu *vcpu, u64 msr)
 {
 	vcpu->kvm->arch.kvm_ops->set_msr(vcpu, msr);
 }
-EXPORT_SYMBOL_GPL(kvmppc_set_msr);
 
 int kvmppc_vcpu_run(struct kvm_vcpu *vcpu)
 {
@@ -959,7 +946,6 @@ int kvmppc_h_logical_ci_load(struct kvm_vcpu *vcpu)
 
 	return H_SUCCESS;
 }
-EXPORT_SYMBOL_GPL(kvmppc_h_logical_ci_load);
 
 int kvmppc_h_logical_ci_store(struct kvm_vcpu *vcpu)
 {
@@ -999,7 +985,6 @@ int kvmppc_h_logical_ci_store(struct kvm_vcpu *vcpu)
 
 	return H_SUCCESS;
 }
-EXPORT_SYMBOL_GPL(kvmppc_h_logical_ci_store);
 
 int kvmppc_core_check_processor_compat(void)
 {
