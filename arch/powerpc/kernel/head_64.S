@@ -685,9 +685,9 @@ p_end: .8byte _end - copy_to_here
  * Note: this routine *only* clobbers r0, r6 and lr
  */
 _GLOBAL(copy_and_flush)
-	addi	r5,r5,-8
-	addi	r6,r6,-8
-4:	li	r0,8			/* Use the smallest common	*/
+	addi	r5,r5,-16
+	addi	r6,r6,-16
+4:	li	r0,4			/* Use the smallest common	*/
 					/* denominator cache line	*/
 					/* size.  This results in	*/
 					/* extra cache line flushes	*/
@@ -697,18 +697,19 @@ _GLOBAL(copy_and_flush)
 					/* moved too.			*/
 
 	mtctr	r0			/* put # words/line in ctr	*/
-3:	addi	r6,r6,8			/* copy a cache line		*/
-	ldx	r0,r6,r4
-	stdx	r0,r6,r3
+3:	addi	r6,r6,16		/* copy a cache line		*/
+	add	r7,r6,r4
+	lq	r8,0(r7)
+	add	r7,r6,r3
+	stq	r8,0(r7)
 	bdnz	3b
 	dcbst	r6,r3			/* write it to memory		*/
-	sync
 	icbi	r6,r3			/* flush the icache line	*/
 	cmpld	0,r6,r5
 	blt	4b
 	sync
-	addi	r5,r5,8
-	addi	r6,r6,8
+	addi	r5,r5,16
+	addi	r6,r6,16
 	isync
 	blr
 
