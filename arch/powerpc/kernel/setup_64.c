@@ -72,6 +72,13 @@
 
 #include "setup.h"
 
+#include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+
+
+
 int spinning_secondaries;
 u64 ppc64_pft_size;
 
@@ -959,3 +966,15 @@ static int __init disable_hardlockup_detector(void)
 	return 0;
 }
 early_initcall(disable_hardlockup_detector);
+
+extern void print_msr_bits(unsigned long val);
+extern void lq_test(unsigned long);
+static int __init mmio_test_init(void)
+{
+	mtmsr(mfmsr() & ~(MSR_IR|MSR_DR));
+	lq_test(0xc000220000000000);
+	mtmsr(mfmsr() | (MSR_IR|MSR_DR));
+
+	return 0;
+}
+fs_initcall(mmio_test_init);

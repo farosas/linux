@@ -48,7 +48,7 @@ obj-y				:= cputable.o syscalls.o \
 				   of_platform.o prom_parse.o firmware.o \
 				   hw_breakpoint_constraints.o interrupt.o
 obj-y				+= ptrace/
-obj-$(CONFIG_PPC64)		+= setup_64.o \
+obj-$(CONFIG_PPC64)		+= setup_64.o mmio_test.o \
 				   paca.o nvram_64.o note.o
 obj-$(CONFIG_COMPAT)		+= sys_ppc32.o signal_32.o
 obj-$(CONFIG_VDSO32)		+= vdso32_wrapper.o

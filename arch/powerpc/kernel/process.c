@@ -1465,7 +1465,7 @@ static void print_tm_bits(unsigned long val)
 static void print_tm_bits(unsigned long val) {}
 #endif
 
-static void print_msr_bits(unsigned long val)
+void print_msr_bits(unsigned long val)
 {
 	pr_cont("<");
 	print_bits(val, msr_bits, ",");
