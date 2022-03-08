@@ -677,6 +677,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_PPC_RPT_INVALIDATE:
 		r = 1;
 		break;
+	case KVM_CAP_PPC_GTSE_DISABLE:
+		r = !mmu_has_feature(MMU_FTR_GTSE);
+		break;
 #endif
 	default:
 		r = 0;

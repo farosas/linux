@@ -7011,6 +7011,16 @@ resource that is controlled with the H_SET_MODE hypercall.
 This capability allows a guest kernel to use a better-performance mode for
 handling interrupts and system calls.
 
+7.31 KVM_CAP_PPC_GTSE_DISABLE
+-------------------------------
+
+:Capability: KVM_CAP_PPC_GTSE_DISABLE
+:Architectures: ppc
+:Type: vm
+
+The presence of this capability indicates that the userspace is
+allowed to disable Guest Translation Shootdown (GTSE) for guests.
+
 8. Other capabilities.
 ======================
 
